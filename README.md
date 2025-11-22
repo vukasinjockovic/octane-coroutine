@@ -1,15 +1,123 @@
-<p align="center"><img width="335" height="61" src="/art/logo.svg" alt="Logo Laravel Octane"></p>
+## ⚡ Swoole Coroutine Support (Enhanced Fork)
 
-<p align="center">
-<a href="https://github.com/laravel/octane/actions"><img src="https://github.com/laravel/octane/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/octane"><img src="https://img.shields.io/packagist/dt/laravel/octane" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/octane"><img src="https://img.shields.io/packagist/v/laravel/octane" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/octane"><img src="https://img.shields.io/packagist/l/laravel/octane" alt="License"></a>
-</p>
+This fork extends Laravel Octane with **true coroutine support** for Swoole, enabling non-blocking I/O and massive concurrency improvements.
 
-## Introduction
+### The Problem
 
-Laravel Octane supercharges your application's performance by serving your application using high-powered application servers, including [FrankenPHP](https://frankenphp.dev), [Open Swoole](https://openswoole.com), [Swoole](https://github.com/swoole/swoole-src), and [RoadRunner](https://roadrunner.dev). Octane boots your application once, keeps it in memory, and then feeds it requests at supersonic speeds.
+Standard Octane uses a "One Worker = One Request" model. When a request performs blocking I/O (database queries, API calls, sleep), the entire worker is blocked:
+
+```
+4 workers × 1 request/worker = 4 concurrent requests max
+```
+
+With 5-second blocking operations, this means **0.8 requests/second throughput**.
+
+### The Solution: Coroutine Pool
+
+This fork implements a **Worker Pool** architecture where each Swoole worker maintains a pool of isolated Laravel Application instances:
+
+```
+4 workers × 50 concurrent requests/worker = 200 concurrent requests
+```
+
+With the same 5-second blocking operations, this achieves **40 requests/second throughput** — a **50× improvement**!
+
+### Key Features
+
+✅ **Non-blocking I/O** - Automatic coroutine switching during database/API calls  
+✅ **Massive concurrency** - Handle 50-500 concurrent requests per worker  
+✅ **Complete isolation** - Each coroutine gets its own Application instance  
+✅ **Production-safe** - Proper state management prevents memory leaks  
+✅ **Configurable** - Tune pool size via CLI, env vars, or config  
+✅ **Memory-efficient** - Smart defaults prevent resource exhaustion
+
+### Quick Start
+
+```bash
+# Install dependencies
+composer install
+
+# Configure pool size (optional, default is 50)
+echo "OCTANE_POOL_SIZE=100" >> .env
+
+# Start with coroutine support
+php artisan octane:start --server=swoole --workers=4 --pool=100
+```
+
+### Configuration Options
+
+**1. Via CLI (highest priority):**
+```bash
+php artisan octane:start --server=swoole --pool=25
+```
+
+**2. Via Environment Variable:**
+```bash
+# .env
+OCTANE_POOL_SIZE=50
+```
+
+**3. Via Config File:**
+```php
+// config/octane.php
+'swoole' => [
+    'pool' => [
+        'size' => 50,        // Application instances per worker
+        'min_size' => 1,     // Minimum allowed
+        'max_size' => 1000,  // Maximum allowed
+    ],
+],
+```
+
+### Performance Comparison
+
+| Scenario | Standard Octane | With Coroutines | Improvement |
+|----------|----------------|-----------------|-------------|
+| **5s blocking I/O** | 0.8 req/s | 40 req/s | **50×** |
+| **1s blocking I/O** | 4 req/s | 200 req/s | **50×** |
+| **Memory usage** | ~200MB | ~2-10GB* | - |
+| **Concurrent requests** | 4 | 200 | **50×** |
+
+*Depends on pool size and application complexity
+
+### Resource Planning
+
+Choose your pool size based on available resources:
+
+- **Small (10-20)**: Development, 2-4GB RAM
+- **Medium (50-100)**: Production small-medium, 4-8GB RAM  
+- **Large (150-300)**: High-traffic, 8-16GB RAM
+- **XL (400-1000)**: Enterprise, 16GB+ RAM
+
+**Formula**: `Memory needed ≈ pool_size × workers × 10-50MB per Application`
+
+### Important Notes
+
+⚠️ Ensure your **database max_connections** can handle `pool_size × workers`  
+⚠️ Monitor memory usage and adjust pool size accordingly  
+⚠️ Avoid static variables in your application code (they're shared across coroutines)
+
+### Architecture
+
+Unlike standard Octane which uses process-level concurrency, this fork implements **coroutine-level concurrency** using:
+
+- `Swoole\Coroutine\Channel` for Worker pooling
+- `Swoole\Coroutine::getContext()` for request isolation
+- Isolated Laravel Application instances per coroutine
+- Coroutine-safe timer table using `Coroutine::getCid()`
+
+### When to Use This Fork
+
+✅ **Use this fork if:**
+- Your app makes many external API calls
+- You have long-running database queries
+- You need to handle 1000+ concurrent requests
+- Your operations involve blocking I/O (file uploads, etc.)
+
+❌ **Standard Octane is fine if:**
+- Your requests are purely CPU-bound
+- Average response time is <100ms
+- You don't need high concurrency
 
 ## Official Documentation
 

@@ -8,6 +8,7 @@ use Laravel\Octane\Swoole\SwooleClient;
 use Laravel\Octane\Swoole\SwooleExtension;
 use Laravel\Octane\Swoole\WorkerState;
 use Laravel\Octane\Worker;
+use Swoole\Coroutine\Channel;
 use Swoole\Http\Server;
 use Throwable;
 
@@ -61,14 +62,37 @@ class OnWorkerStart
     protected function bootWorker($server)
     {
         try {
-            return tap(new Worker(
-                new ApplicationFactory($this->basePath),
-                $this->workerState->client = new SwooleClient
-            ))->boot([
-                'octane.cacheTable' => $this->workerState->cacheTable,
-                Server::class => $server,
-                WorkerState::class => $this->workerState,
-            ]);
+            $poolConfig = $this->serverState['octaneConfig']['swoole']['pool'] ?? [];
+            $poolSize = $poolConfig['size'] ?? 256;
+            $minSize = $poolConfig['min_size'] ?? 1;
+            $maxSize = $poolConfig['max_size'] ?? 1000;
+
+            $poolSize = max($minSize, min($maxSize, $poolSize));
+
+            $this->workerState->clientPool = new Channel($poolSize);
+
+            // Create pool of Workers, each with its own Application instance
+            for ($i = 0; $i < $poolSize; $i++) {
+                $worker = new Worker(
+                    new ApplicationFactory($this->basePath),
+                    new SwooleClient
+                );
+                
+                $worker->boot([
+                    'octane.cacheTable' => $this->workerState->cacheTable,
+                    Server::class => $server,
+                    WorkerState::class => $this->workerState,
+                ]);
+                
+                $this->workerState->clientPool->push($worker);
+            }
+
+            // Keep the first worker as the default for backward compatibility
+            $this->workerState->worker = $this->workerState->clientPool->pop();
+            $this->workerState->clientPool->push($this->workerState->worker);
+            $this->workerState->client = $this->workerState->worker->client ?? new SwooleClient;
+
+            return $this->workerState->worker;
         } catch (Throwable $e) {
             Stream::shutdown($e);
 

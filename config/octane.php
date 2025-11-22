@@ -174,6 +174,25 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Octane Swoole Configuration
+    |--------------------------------------------------------------------------
+    |
+    | While using Swoole, you may define additional configuration options as
+    | required by the application. These options can be used to configure
+    | the Swoole server and its workers.
+    |
+    */
+
+    'swoole' => [
+        'pool' => [
+            'size' => env('OCTANE_POOL_SIZE', 50),
+            'min_size' => env('OCTANE_POOL_MIN_SIZE', 1),
+            'max_size' => env('OCTANE_POOL_MAX_SIZE', 1000),
+        ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | File Watching
     |--------------------------------------------------------------------------
     |

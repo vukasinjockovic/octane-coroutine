@@ -14,6 +14,8 @@ class WorkerState
 
     public $client;
 
+    public $clientPool;
+
     public $timerTable;
 
     public $cacheTable;

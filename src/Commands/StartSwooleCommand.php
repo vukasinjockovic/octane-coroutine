@@ -27,6 +27,7 @@ class StartSwooleCommand extends Command implements SignalableCommandInterface
                     {--workers=auto : The number of workers that should be available to handle requests}
                     {--task-workers=auto : The number of task workers that should be available to handle tasks}
                     {--max-requests=500 : The number of requests to process before reloading the server}
+                    {--pool= : The number of application instances in the coroutine pool}
                     {--watch : Automatically reload the server when the application is modified}
                     {--poll : Use file system polling while watching in order to watch files over a network}';
 
@@ -101,6 +102,13 @@ class StartSwooleCommand extends Command implements SignalableCommandInterface
         ServerStateFile $serverStateFile,
         SwooleExtension $extension
     ) {
+        $octaneConfig = config('octane');
+        
+        // Override pool size if specified via CLI
+        if ($this->option('pool')) {
+            $octaneConfig['swoole']['pool']['size'] = (int) $this->option('pool');
+        }
+        
         $serverStateFile->writeState([
             'appName' => config('app.name', 'Laravel'),
             'host' => $this->getHost(),
@@ -111,7 +119,7 @@ class StartSwooleCommand extends Command implements SignalableCommandInterface
             'publicPath' => public_path(),
             'storagePath' => storage_path(),
             'defaultServerOptions' => $this->defaultServerOptions($extension),
-            'octaneConfig' => config('octane'),
+            'octaneConfig' => $octaneConfig,
         ]);
     }
 

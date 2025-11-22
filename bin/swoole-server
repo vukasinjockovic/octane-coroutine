@@ -8,6 +8,7 @@ use Laravel\Octane\Swoole\Handlers\OnWorkerStart;
 use Laravel\Octane\Swoole\ServerStateFile;
 use Laravel\Octane\Swoole\SwooleExtension;
 use Laravel\Octane\Swoole\WorkerState;
+use Swoole\Coroutine;
 use Swoole\Http\Server;
 use Swoole\Timer;
 
@@ -111,23 +112,32 @@ $server->on('workerstart', fn (Server $server, $workerId) =>
 $server->on('request', function ($request, $response) use ($server, $workerState, $serverState) {
     $workerState->lastRequestTime = microtime(true);
 
+    $context = Coroutine::getContext();
+    $worker = $workerState->clientPool->pop();
+    $context['worker'] = $worker;
+    $context['worker_id'] = $workerState->workerId;
+
     if ($workerState->timerTable) {
-        $workerState->timerTable->set($workerState->workerId, [
+        $workerState->timerTable->set(Coroutine::getCid(), [
             'worker_pid' => $workerState->workerPid,
             'time' => time(),
             'fd' => $request->fd,
         ]);
     }
 
-    $workerState->worker->handle(...$workerState->client->marshalRequest(new RequestContext([
-        'swooleRequest' => $request,
-        'swooleResponse' => $response,
-        'publicPath' => $serverState['publicPath'],
-        'octaneConfig' => $serverState['octaneConfig'],
-    ])));
+    try {
+        $worker->handle(...$worker->client->marshalRequest(new RequestContext([
+            'swooleRequest' => $request,
+            'swooleResponse' => $response,
+            'publicPath' => $serverState['publicPath'],
+            'octaneConfig' => $serverState['octaneConfig'],
+        ])));
+    } finally {
+        if ($workerState->timerTable) {
+            $workerState->timerTable->del(Coroutine::getCid());
+        }
 
-    if ($workerState->timerTable) {
-        $workerState->timerTable->del($workerState->workerId);
+        $workerState->clientPool->push($worker);
     }
 });
 

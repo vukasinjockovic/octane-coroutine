@@ -1,13 +1,25 @@
 {
-    "name": "laravel/octane",
-    "description": "Supercharge your Laravel application's performance.",
-    "keywords": ["laravel", "octane", "roadrunner", "swoole", "frankenphp"],
+    "name": "modelslab/octane-coroutine",
+    "description": "Laravel Octane with Swoole Coroutine support for massive concurrency and non-blocking I/O",
+    "keywords": [
+        "laravel",
+        "octane",
+        "swoole",
+        "coroutine",
+        "async",
+        "non-blocking",
+        "performance"
+    ],
     "license": "MIT",
     "support": {
-        "issues": "https://github.com/laravel/octane/issues",
-        "source": "https://github.com/laravel/octane"
+        "issues": "https://github.com/modelslab/octane-coroutine/issues",
+        "source": "https://github.com/modelslab/octane-coroutine"
     },
     "authors": [
+        {
+            "name": "Adhik Joshi",
+            "email": "adhik@modelslab.com"
+        },
         {
             "name": "Taylor Otwell",
             "email": "taylor@laravel.com"
