@@ -33,14 +33,37 @@ With the same 5-second blocking operations, this achieves **40 requests/second t
 
 ### Quick Start
 
+Since this package is not yet on Packagist, install it directly from the GitHub repository:
+
+1. **Update `composer.json`** to include the repository:
+
+```json
+"repositories": [
+    {
+        "type": "vcs",
+        "url": "https://github.com/ModelsLab/octane-coroutine"
+    }
+],
+"require": {
+    "modelslab/octane-coroutine": "^0.1"
+}
+```
+
+2. **Install the package**:
+
 ```bash
-# Install dependencies
-composer install
+composer update
+```
 
-# Configure pool size (optional, default is 50)
+3. **Configure pool size** (optional, default is 50):
+
+```bash
 echo "OCTANE_POOL_SIZE=100" >> .env
+```
 
-# Start with coroutine support
+4. **Start with coroutine support**:
+
+```bash
 php artisan octane:start --server=swoole --workers=4 --pool=100
 ```
 

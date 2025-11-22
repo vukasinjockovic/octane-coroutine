@@ -10,6 +10,9 @@
         "non-blocking",
         "performance"
     ],
+    "replace": {
+        "laravel/octane": "*"
+    },
     "license": "MIT",
     "support": {
         "issues": "https://github.com/modelslab/octane-coroutine/issues",
