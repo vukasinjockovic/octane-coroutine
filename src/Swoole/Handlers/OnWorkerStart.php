@@ -31,6 +31,11 @@ class OnWorkerStart
      */
     public function __invoke($server, int $workerId)
     {
+        error_log("🚀 Worker #{$workerId} starting initialization...");
+        
+        // Enable coroutine hooks to make blocking functions (sleep, file_get_contents, etc.) coroutine-safe
+        \Swoole\Runtime::enableCoroutine(SWOOLE_HOOK_ALL);
+        
         if ($this->shouldClearOpcodeCache()) {
             $this->clearOpcodeCache();
         }
@@ -51,6 +56,8 @@ class OnWorkerStart
                 $isTaskWorker ? 'task worker process' : 'worker process',
             );
         }
+        
+        error_log("✅ Worker #{$workerId} (PID: {$this->workerState->workerPid}) initialized and ready!");
     }
 
     /**
@@ -62,59 +69,22 @@ class OnWorkerStart
     protected function bootWorker($server)
     {
         try {
-            $poolConfig = $this->serverState['octaneConfig']['swoole']['pool'] ?? [];
-            $poolSize = $poolConfig['size'] ?? 256;
-            $minSize = $poolConfig['min_size'] ?? 1;
-            $maxSize = $poolConfig['max_size'] ?? 1000;
-
-            $poolSize = max($minSize, min($maxSize, $poolSize));
-
-            $this->workerState->clientPool = new Channel($poolSize);
-
-            // Create pool of Workers, each with its own Application instance
-            for ($i = 0; $i < $poolSize; $i++) {
-                $worker = new Worker(
-                    new ApplicationFactory($this->basePath),
-                    new SwooleClient
-                );
-                
-                $worker->boot([
-                    'octane.cacheTable' => $this->workerState->cacheTable,
-                    Server::class => $server,
-                    WorkerState::class => $this->workerState,
-                ]);
-                
-                $this->workerState->clientPool->push($worker);
-            }
-
-            // Keep the first worker as the default for backward compatibility
-            $this->workerState->worker = $this->workerState->clientPool->pop();
-            $this->workerState->clientPool->push($this->workerState->worker);
-            $this->workerState->client = $this->workerState->worker->client ?? new SwooleClient;
-
-            return $this->workerState->worker;
+            $worker = new Worker(
+                new ApplicationFactory($this->basePath),
+                new SwooleClient
+            );
+            
+            $worker->boot([
+                'octane.cacheTable' => $this->workerState->cacheTable,
+                Server::class => $server,
+                WorkerState::class => $this->workerState,
+            ]);
+            
+            return $worker;
         } catch (Throwable $e) {
-            // Log detailed error information for debugging
-            error_log("====== OCTANE WORKER BOOT FAILED ======");
-            error_log("Worker ID: " . $this->workerState->workerId);
-            error_log("Worker PID: " . $this->workerState->workerPid);
-            error_log("Pool Configuration:");
-            error_log("  - Pool Size: " . ($poolSize ?? 'not set'));
-            error_log("  - Min Size: " . ($minSize ?? 'not set'));
-            error_log("  - Max Size: " . ($maxSize ?? 'not set'));
-            error_log("Error: " . $e->getMessage());
-            error_log("Stack Trace:");
-            error_log($e->getTraceAsString());
-            error_log("=======================================");
-
-            // Ensure clientPool remains null to signal initialization failure
-            $this->workerState->clientPool = null;
-
             Stream::shutdown($e);
 
             $server->shutdown();
-            
-            return null;
         }
     }
 

@@ -131,7 +131,7 @@ class StartSwooleCommand extends Command implements SignalableCommandInterface
     protected function defaultServerOptions(SwooleExtension $extension)
     {
         return [
-            'enable_coroutine' => false,
+            'enable_coroutine' => true,
             'daemonize' => false,
             'log_file' => storage_path('logs/swoole_http.log'),
             'log_level' => app()->environment('local') ? SWOOLE_LOG_INFO : SWOOLE_LOG_ERROR,
