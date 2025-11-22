@@ -126,7 +126,7 @@ $server->on('request', function ($request, $response) use ($server, $workerState
     }
 
     try {
-        $worker->handle(...$worker->client->marshalRequest(new RequestContext([
+        $worker->handle(...$worker->getClient()->marshalRequest(new RequestContext([
             'swooleRequest' => $request,
             'swooleResponse' => $response,
             'publicPath' => $serverState['publicPath'],

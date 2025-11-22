@@ -223,6 +223,14 @@ class Worker implements WorkerContract
     }
 
     /**
+     * Get the client instance being used by the worker.
+     */
+    public function getClient(): Client
+    {
+        return $this->client;
+    }
+
+    /**
      * Get the application instance being used by the worker.
      */
     public function application(): Application
