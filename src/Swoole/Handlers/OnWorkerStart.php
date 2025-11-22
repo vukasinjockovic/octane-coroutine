@@ -94,9 +94,27 @@ class OnWorkerStart
 
             return $this->workerState->worker;
         } catch (Throwable $e) {
+            // Log detailed error information for debugging
+            error_log("====== OCTANE WORKER BOOT FAILED ======");
+            error_log("Worker ID: " . $this->workerState->workerId);
+            error_log("Worker PID: " . $this->workerState->workerPid);
+            error_log("Pool Configuration:");
+            error_log("  - Pool Size: " . ($poolSize ?? 'not set'));
+            error_log("  - Min Size: " . ($minSize ?? 'not set'));
+            error_log("  - Max Size: " . ($maxSize ?? 'not set'));
+            error_log("Error: " . $e->getMessage());
+            error_log("Stack Trace:");
+            error_log($e->getTraceAsString());
+            error_log("=======================================");
+
+            // Ensure clientPool remains null to signal initialization failure
+            $this->workerState->clientPool = null;
+
             Stream::shutdown($e);
 
             $server->shutdown();
+            
+            return null;
         }
     }
 
