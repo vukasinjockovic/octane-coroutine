@@ -108,6 +108,61 @@ Edit `config/octane.php` if needed:
 ],
 ```
 
+## ⚡ Performance Optimization
+
+### CPU Usage and Tick Timers
+
+**Following Hyperf/Swoole best practices**, this fork **disables tick timers by default** to prevent unnecessary CPU usage.
+
+#### What are Tick Timers?
+
+Octane can dispatch "tick" events to task workers every second. However:
+
+- **Tick is disabled by default** (`'tick' => false` in `config/octane.php`)
+- **Task workers are set to 0 by default** when tick is disabled
+- This prevents **100% CPU usage** from idle task workers waking up every second
+
+#### Why Disable Tick?
+
+In earlier configurations, tick timers with `--task-workers=auto` would create one task worker per CPU core (e.g., 12 workers on a 12-core system). Even with no traffic:
+
+```
+12 task workers × tick every 1 second = constant CPU overhead
+```
+
+This causes high CPU usage even when the server is idle!
+
+#### When to Enable Tick
+
+Only enable tick if you have **listeners for `TickReceived` or `TickTerminated` events** that need to run periodically:
+
+```php
+// config/octane.php
+'swoole' => [
+    'tick' => true,  // Enable tick timers
+],
+```
+
+Then start with **minimal task workers** (not auto):
+
+```bash
+# Good: Only 1-2 task workers for tick
+php artisan octane:start --task-workers=1
+
+# Bad: Creates CPU_COUNT task workers (excessive overhead)
+php artisan octane:start --task-workers=auto
+```
+
+#### Task Worker Guidelines
+
+| Scenario | Recommended `--task-workers` |
+|----------|------------------------------|
+| Tick disabled (default) | `0` (auto) |
+| Tick enabled | `1` or `2` |
+| Heavy async task dispatch | `2` to `4` |
+| Never use | `auto` (causes CPU overhead) |
+
+
 ## 📊 Performance Benchmarks
 
 Real-world load testing results with `wrk`:

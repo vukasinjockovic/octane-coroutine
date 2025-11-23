@@ -37,10 +37,23 @@ class OnServerStart
             $this->extension->setProcessName($this->appName, 'master process');
         }
 
+        // Following Hyperf/Swoole best practices: only create tick timer if both
+        // tick is enabled AND task workers are available to handle the ticks
         if ($this->shouldTick) {
-            Timer::tick(1000, function () use ($server) {
-                $server->task('octane-tick');
-            });
+            $taskWorkerNum = $server->setting['task_worker_num'] ?? 0;
+            
+            if ($taskWorkerNum > 0) {
+                Timer::tick(1000, function () use ($server) {
+                    $server->task('octane-tick');
+                });
+            } else {
+                // Log warning if tick is enabled but no task workers available
+                error_log(
+                    '⚠️  Octane tick is enabled but task_worker_num is 0. ' .
+                    'Tick events will not be dispatched. ' .
+                    'Either disable tick in config/octane.php or start with --task-workers=1'
+                );
+            }
         }
 
         if ($this->maxExecutionTime > 0) {

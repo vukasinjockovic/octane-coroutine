@@ -161,13 +161,30 @@ class StartSwooleCommand extends Command implements SignalableCommandInterface
     /**
      * Get the number of task workers that should be started.
      *
+     * Following Hyperf/Swoole best practices, task workers are disabled by
+     * default (0) since most applications don't need them. Task workers are
+     * only required if:
+     * 1. You explicitly use $server->task() to dispatch async tasks
+     * 2. You enable tick timers (config('octane.swoole.tick'))
+     *
+     * If tick is enabled, we use 1 task worker (not CPU count) to handle
+     * tick events efficiently without creating excessive worker overhead.
+     *
      * @return int
      */
     protected function taskWorkerCount(SwooleExtension $extension)
     {
-        return $this->option('task-workers') === 'auto'
-                    ? $extension->cpuCount()
-                    : $this->option('task-workers');
+        $taskWorkers = $this->option('task-workers');
+        
+        // If explicitly set, use that value
+        if ($taskWorkers !== 'auto') {
+            return (int) $taskWorkers;
+        }
+        
+        // For 'auto': if tick is enabled, use 1 worker; otherwise 0
+        $tickEnabled = config('octane.swoole.tick', false);
+        
+        return $tickEnabled ? 1 : 0;
     }
 
     /**

@@ -189,6 +189,25 @@ return [
             'min_size' => env('OCTANE_POOL_MIN_SIZE', 1),
             'max_size' => env('OCTANE_POOL_MAX_SIZE', 1000),
         ],
+
+        /*
+        |--------------------------------------------------------------------------
+        | Tick Timer (Disabled by Default for Performance)
+        |--------------------------------------------------------------------------
+        |
+        | Octane can dispatch "tick" events to task workers every second. However,
+        | this requires task workers to be enabled and causes periodic CPU usage
+        | even with no traffic. Following Hyperf/Swoole best practices, tick is
+        | disabled by default. Only enable if you have listeners for TickReceived
+        | or TickTerminated events that need to run on a schedule.
+        |
+        | IMPORTANT: If you enable tick, ensure task workers are also enabled via
+        | the --task-workers option (e.g., --task-workers=1 or --task-workers=2).
+        | Using auto will create CPU_COUNT task workers which is excessive.
+        |
+        */
+
+        'tick' => env('OCTANE_TICK', false),
     ],
 
     /*
