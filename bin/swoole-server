@@ -112,20 +112,35 @@ $server->on('workerstart', fn (Server $server, $workerId) =>
 $server->on('request', function ($request, $response) use ($server, $workerState, $serverState) {
     $workerState->lastRequestTime = microtime(true);
 
-    // Check if worker is initialized
-    if (!$workerState->worker) {
-        $response->status(503);
-        $response->header('Content-Type', 'application/json');
-        $response->end(json_encode([
-            'error' => 'Service Unavailable',
-            'message' => 'Worker not initialized yet',
-            'worker_id' => $workerState->workerId ?? null,
-        ]));
-        return;
+    // Get a worker from the pool with a timeout (Queuing mechanism)
+    $worker = null;
+    if ($workerState->clientPool) {
+        // Wait up to 30 seconds for a free worker
+        $worker = $workerState->clientPool->pop(30.0);
+        
+        if ($worker === false) {
+            $errCode = $workerState->clientPool->errCode;
+            error_log("❌ Pool pop failed! ErrCode: {$errCode}, Stats: " . json_encode($workerState->clientPool->stats()));
+            
+            // Timeout occurred - pool is exhausted and queue is full/slow
+            $response->status(503);
+            $response->header('Content-Type', 'application/json');
+            $response->header('Retry-After', '5');
+            $response->end(json_encode([
+                'error' => 'Service Unavailable',
+                'message' => 'Server is too busy, please try again later',
+                'debug_pool_stats' => $workerState->clientPool->stats(),
+                'debug_err_code' => $errCode
+            ]));
+            return;
+        }
+    } else {
+        // Fallback if pool not initialized (shouldn't happen with new OnWorkerStart)
+        $worker = $workerState->worker;
     }
 
     $context = Coroutine::getContext();
-    $context['worker'] = $workerState->worker;
+    $context['worker'] = $worker;
     $context['worker_id'] = $workerState->workerId;
 
     if ($workerState->timerTable) {
@@ -137,12 +152,39 @@ $server->on('request', function ($request, $response) use ($server, $workerState
     }
 
     try {
-        $workerState->worker->handle(...$workerState->worker->getClient()->marshalRequest(new RequestContext([
+        $worker->handle(...$worker->getClient()->marshalRequest(new RequestContext([
             'swooleRequest' => $request,
             'swooleResponse' => $response,
             'publicPath' => $serverState['publicPath'],
             'octaneConfig' => $serverState['octaneConfig'],
         ])));
+    } catch (\Throwable $e) {
+        // CRITICAL FIX: Catch all exceptions to prevent worker crashes
+        // Log the error and send a 500 response instead of crashing
+        error_log("❌ CRITICAL ERROR in Worker #{$workerState->workerId} (Coroutine #" . Coroutine::getCid() . "): " . $e->getMessage());
+        error_log("   File: {$e->getFile()}:{$e->getLine()}");
+        
+        // Send 500 error response if not already sent
+        if (!$response->isWritable()) {
+            error_log("   Response already sent, cannot send error response");
+        } else {
+            try {
+                $response->status(500);
+                $response->header('Content-Type', 'application/json');
+                $response->end(json_encode([
+                    'error' => 'Internal Server Error',
+                    'message' => (isset($serverState['octaneConfig']['app']['debug']) && $serverState['octaneConfig']['app']['debug'])
+                        ? $e->getMessage()
+                        : 'An error occurred while processing your request',
+                    'worker_id' => $workerState->workerId,
+                    'coroutine_id' => Coroutine::getCid(),
+                ]));
+            } catch (\Throwable $responseError) {
+                error_log("   Failed to send error response: " . $responseError->getMessage());
+            }
+        }
+        
+        // Worker continues! Don't crash, just handle the next request
     } finally {
         if ($workerState->timerTable) {
             $workerState->timerTable->del(Coroutine::getCid());
@@ -182,12 +224,22 @@ $server->on('finish', fn (Server $server, int $taskId, $result) => $result);
 |
 */
 
-$server->on('workerstop', function () use ($workerState) {
+$server->on('workerstop', function ($server, $workerId) use ($workerState) {
+    $isTaskWorker = $workerId >= ($server->setting['worker_num'] ?? 0);
+    $workerType = $isTaskWorker ? 'TASK WORKER' : 'WORKER';
+    
+    // Try to get request count if available (might not be accessible depending on Swoole version)
+    $maxRequest = $server->setting['max_request'] ?? 'unknown';
+    
+    error_log("💀 {$workerType} #{$workerId} STOPPING (max_request limit: {$maxRequest})");
+    
     if ($workerState->tickTimerId) {
         Timer::clear($workerState->tickTimerId);
     }
 
-    $workerState->worker->terminate();
+    if ($workerState->worker) {
+        $workerState->worker->terminate();
+    }
 });
 
 $server->start();

@@ -31,7 +31,14 @@ class OnWorkerStart
      */
     public function __invoke($server, int $workerId)
     {
-        error_log("🚀 Worker #{$workerId} starting initialization...");
+        // Log detailed worker start info with actual Swoole settings
+        $maxRequest = $server->setting['max_request'] ?? 'not set';
+        $reloadAsync = isset($server->setting['reload_async']) && $server->setting['reload_async'] ? 'true' : 'false';
+        $workerNum = $server->setting['worker_num'] ?? 'unknown';
+        $isTaskWorker = $workerId >= ($workerNum);
+        
+        $workerType = $isTaskWorker ? 'TASK WORKER' : 'WORKER';
+        error_log("🚀 {$workerType} #{$workerId} STARTING (max_request: {$maxRequest}, reload_async: {$reloadAsync})");
         
         // Enable coroutine hooks to make blocking functions (sleep, file_get_contents, etc.) coroutine-safe
         \Swoole\Runtime::enableCoroutine(SWOOLE_HOOK_ALL);
@@ -57,7 +64,7 @@ class OnWorkerStart
             );
         }
         
-        error_log("✅ Worker #{$workerId} (PID: {$this->workerState->workerPid}) initialized and ready!");
+        error_log("✅ {$workerType} #{$workerId} (PID: {$this->workerState->workerPid}) initialized and ready!");
     }
 
     /**
@@ -69,18 +76,44 @@ class OnWorkerStart
     protected function bootWorker($server)
     {
         try {
-            $worker = new Worker(
-                new ApplicationFactory($this->basePath),
-                new SwooleClient
-            );
-            
-            $worker->boot([
-                'octane.cacheTable' => $this->workerState->cacheTable,
-                Server::class => $server,
-                WorkerState::class => $this->workerState,
-            ]);
-            
-            return $worker;
+            $poolConfig = $this->serverState['octaneConfig']['swoole']['pool'] ?? [];
+            $poolSize = $poolConfig['size'] ?? 256;
+            $minSize = $poolConfig['min_size'] ?? 1;
+            $maxSize = $poolConfig['max_size'] ?? 1000;
+
+            $poolSize = max($minSize, min($maxSize, $poolSize));
+
+            error_log("🏊 Creating worker pool with size: {$poolSize} (min: {$minSize}, max: {$maxSize})");
+
+            $this->workerState->clientPool = new Channel($poolSize);
+
+            // Create pool of Workers, each with its own Application instance
+            for ($i = 0; $i < $poolSize; $i++) {
+                // CRITICAL FIX: Clear Facade resolved instances to prevent state leaks (e.g. Breadcrumbs)
+                \Illuminate\Support\Facades\Facade::clearResolvedInstances();
+                
+                $worker = new Worker(
+                    new ApplicationFactory($this->basePath),
+                    new SwooleClient
+                );
+                
+                $worker->boot([
+                    'octane.cacheTable' => $this->workerState->cacheTable,
+                    Server::class => $server,
+                    WorkerState::class => $this->workerState,
+                ]);
+                
+                $this->workerState->clientPool->push($worker);
+            }
+
+            // Keep the first worker as the default for backward compatibility
+            $this->workerState->worker = $this->workerState->clientPool->pop();
+            $this->workerState->clientPool->push($this->workerState->worker);
+            $this->workerState->client = $this->workerState->worker->getClient() ?? new SwooleClient;
+
+            error_log("✅ Worker pool created successfully with {$poolSize} instances");
+
+            return $this->workerState->worker;
         } catch (Throwable $e) {
             Stream::shutdown($e);
 

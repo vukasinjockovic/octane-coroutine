@@ -277,8 +277,16 @@ class SwooleClient implements Client, ServesStaticFiles
         $context->swooleResponse->header('Status', '500 Internal Server Error');
         $context->swooleResponse->header('Content-Type', 'text/plain');
 
+        $debug = false;
+        
+        try {
+            $debug = $app->make('config')->get('app.debug');
+        } catch (Throwable) {
+            // If config is missing, default to false
+        }
+
         $context->swooleResponse->end(
-            Octane::formatExceptionForClient($e, $app->make('config')->get('app.debug'))
+            Octane::formatExceptionForClient($e, $debug)
         );
     }
 
