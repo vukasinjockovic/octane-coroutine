@@ -6,6 +6,7 @@ use Laravel\Octane\ApplicationFactory;
 use Laravel\Octane\Stream;
 use Laravel\Octane\Swoole\Coroutine\Context;
 use Laravel\Octane\Swoole\Coroutine\CoordinatorManager;
+use Laravel\Octane\Swoole\Coroutine\FacadeCache;
 use Laravel\Octane\Swoole\SwooleClient;
 use Laravel\Octane\Swoole\SwooleExtension;
 use Laravel\Octane\Swoole\WorkerState;
@@ -15,6 +16,7 @@ use Swoole\Http\Server;
 use Throwable;
 use Laravel\Octane\Swoole\Coroutine\CoroutineApplication;
 use Illuminate\Container\Container;
+use Illuminate\Support\Facades\Facade;
 
 class OnWorkerStart
 {
@@ -112,6 +114,7 @@ class OnWorkerStart
         // Clear Facade resolved instances
         \Illuminate\Support\Facades\Facade::clearResolvedInstances();
         Context::clear();
+        FacadeCache::disable();
 
         $worker = new Worker(
             new ApplicationFactory($this->basePath),
@@ -188,9 +191,17 @@ class OnWorkerStart
         $this->workerState->client = $this->workerState->worker->getClient() ?? new SwooleClient;
 
         // Install CoroutineApplication proxy as the global container instance
+        // This ensures ALL container resolution goes through our coroutine-aware proxy
         $baseApp = $this->workerState->worker->application();
         $coroutineApp = new CoroutineApplication($baseApp);
         Container::setInstance($coroutineApp);
+
+        // CRITICAL FIX (Bug #1): Facades MUST use the coroutine-aware proxy
+        // Without this, Facades resolve from the base app and cache globally,
+        // causing state leaks like "Target class [config] does not exist"
+        Facade::clearResolvedInstances();
+        Facade::setFacadeApplication($coroutineApp);
+        FacadeCache::disable();
 
         // Store worker pool in context for easy access
         Context::set('octane.worker_pool', $this->workerState->clientPool);
@@ -232,11 +243,25 @@ class OnWorkerStart
                 return;
             }
 
+            // FIX (Bug #8): Get request start time from coroutine context
+            // instead of global workerState to prevent metrics corruption
+            $requestStartTime = null;
+            $cid = \Swoole\Coroutine::getCid();
+            if ($cid > 0) {
+                $context = \Swoole\Coroutine::getContext($cid);
+                $requestStartTime = $context['request_start_time'] ?? null;
+            }
+
+            // Fallback to workerState if context not available (shouldn't happen)
+            if ($requestStartTime === null) {
+                $requestStartTime = $this->workerState->lastRequestTime ?? microtime(true);
+            }
+
             Stream::request(
                 $request->getMethod(),
                 $request->fullUrl(),
                 $response->getStatusCode(),
-                (microtime(true) - $this->workerState->lastRequestTime) * 1000,
+                (microtime(true) - $requestStartTime) * 1000,
             );
         });
     }

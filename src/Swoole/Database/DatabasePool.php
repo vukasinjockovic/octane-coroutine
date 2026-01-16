@@ -4,11 +4,12 @@ namespace Laravel\Octane\Swoole\Database;
 
 use Swoole\Coroutine\Channel;
 use Illuminate\Database\Connectors\ConnectionFactory;
+use Illuminate\Database\Connection;
 use Throwable;
 
 /**
  * Custom Connection Pool for Laravel
- * 
+ *
  * Inspired by Hyperf's Pool architecture but designed for Laravel compatibility.
  * Uses Swoole Channels for coroutine-safe connection pooling.
  */
@@ -27,16 +28,20 @@ class DatabasePool
         $this->name = $name;
         $this->factory = $factory;
         $this->connectionConfig = $connectionConfig;
-        
+
         // Create a channel for pooling connections
         // Channel size = max_connections
         $maxConnections = $config['max_connections'] ?? 10;
         $this->channel = new Channel($maxConnections);
-        
+
         // Pre-create minimum connections
         $minConnections = $config['min_connections'] ?? 1;
         for ($i = 0; $i < $minConnections; $i++) {
-            $this->channel->push($this->createConnection());
+            try {
+                $this->channel->push($this->createConnection());
+            } catch (Throwable $e) {
+                error_log("❌ Failed to create initial pool connection: " . $e->getMessage());
+            }
         }
     }
 
@@ -46,10 +51,10 @@ class DatabasePool
     public function get()
     {
         $waitTimeout = $this->config['wait_timeout'] ?? 3.0;
-        
+
         // Try to get from pool first
         $connection = $this->channel->pop($waitTimeout);
-        
+
         if ($connection === false) {
             // Channel is empty and timeout reached
             // Try to create a new connection if under max limit
@@ -59,22 +64,109 @@ class DatabasePool
                 throw new \RuntimeException('Connection pool exhausted. Cannot establish new connection before wait_timeout.');
             }
         }
-        
+
         // Check if connection is still valid
         if (!$this->checkConnection($connection)) {
             $connection = $this->reconnect($connection);
         }
-        
+
         return $connection;
     }
 
     /**
      * Release a connection back to the pool
+     *
+     * FIX (Bug #5 & #6): Reset connection state and use timeout on push
      */
     public function release($connection): void
     {
-        if ($connection) {
-            $this->channel->push($connection);
+        if (!$connection) {
+            return;
+        }
+
+        try {
+            // FIX (Bug #5): Reset connection state before returning to pool
+            $this->resetConnection($connection);
+
+            // FIX (Bug #6): Use timeout on push to prevent blocking
+            // If push fails (channel full or timeout), close the connection
+            $pushTimeout = $this->config['release_timeout'] ?? 1.0;
+            $pushed = $this->channel->push($connection, $pushTimeout);
+
+            if (!$pushed) {
+                error_log("⚠️ DB pool release timeout - closing connection instead");
+                $this->closeConnection($connection);
+                $this->currentConnections--;
+            }
+        } catch (Throwable $e) {
+            error_log("❌ Error releasing connection to pool: " . $e->getMessage());
+            // Try to close the connection to prevent leaks
+            $this->closeConnection($connection);
+            $this->currentConnections--;
+        }
+    }
+
+    /**
+     * Reset connection state to prevent state leaks between requests.
+     *
+     * FIX (Bug #5): Ensures no transaction or session state carries over.
+     */
+    protected function resetConnection($connection): void
+    {
+        try {
+            // Check if there's an active transaction and roll it back
+            if ($connection instanceof Connection) {
+                // Roll back any open transaction
+                $pdo = $connection->getPdo();
+
+                if ($pdo && $pdo->inTransaction()) {
+                    error_log("⚠️ Rolling back uncommitted transaction before returning to pool");
+                    $pdo->rollBack();
+                }
+
+                // Reset the query log
+                $connection->flushQueryLog();
+
+                // Reset session variables for MySQL
+                $driver = $connection->getDriverName();
+                if (in_array($driver, ['mysql', 'mariadb'])) {
+                    try {
+                        // Reset session state
+                        $pdo->exec('SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+                        $pdo->exec('SET autocommit = 1');
+                    } catch (Throwable $e) {
+                        // Non-critical, log and continue
+                        error_log("⚠️ Could not reset MySQL session: " . $e->getMessage());
+                    }
+                }
+
+                // For PostgreSQL
+                if ($driver === 'pgsql') {
+                    try {
+                        $pdo->exec('RESET ALL');
+                    } catch (Throwable $e) {
+                        error_log("⚠️ Could not reset PostgreSQL session: " . $e->getMessage());
+                    }
+                }
+            }
+        } catch (Throwable $e) {
+            error_log("❌ Error resetting connection state: " . $e->getMessage());
+            // If reset fails, the connection may be in a bad state
+            throw $e;
+        }
+    }
+
+    /**
+     * Safely close a connection
+     */
+    protected function closeConnection($connection): void
+    {
+        try {
+            if ($connection instanceof Connection) {
+                $connection->disconnect();
+            }
+        } catch (Throwable $e) {
+            error_log("⚠️ Error closing connection: " . $e->getMessage());
         }
     }
 
@@ -122,20 +214,15 @@ class DatabasePool
     public function flush(): void
     {
         $minConnections = $this->config['min_connections'] ?? 1;
-        
+
         while ($this->currentConnections > $minConnections) {
             $connection = $this->channel->pop(0.001);
-            
+
             if ($connection === false) {
                 break; // No more connections in channel
             }
-            
-            try {
-                $connection->disconnect();
-            } catch (Throwable $e) {
-                // Ignore disconnect errors
-            }
-            
+
+            $this->closeConnection($connection);
             $this->currentConnections--;
         }
     }

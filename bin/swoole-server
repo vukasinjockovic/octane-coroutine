@@ -10,6 +10,7 @@ use Laravel\Octane\Swoole\ServerStateFile;
 use Laravel\Octane\Swoole\SwooleExtension;
 use Laravel\Octane\Swoole\WorkerState;
 use Laravel\Octane\Swoole\Coroutine\Context;
+use Laravel\Octane\Swoole\Coroutine\Monitor;
 use Swoole\Coroutine;
 use Swoole\Http\Server;
 use Swoole\Timer;
@@ -112,7 +113,9 @@ $server->on('workerstart', fn (Server $server, $workerId) =>
 */
 
 $server->on('request', function ($request, $response) use ($server, $workerState, $serverState) {
-    $workerState->lastRequestTime = microtime(true);
+    // FIX (Bug #8): Store request start time in coroutine context, not global state
+    // This prevents metrics corruption when multiple concurrent requests run
+    $requestStartTime = microtime(true);
 
     // Wait for worker to be fully initialized
     while (! ($workerState->ready ?? false)) {
@@ -146,16 +149,27 @@ $server->on('request', function ($request, $response) use ($server, $workerState
         $worker = $workerState->worker;
     }
 
+    $cid = Coroutine::getCid();
     $context = Coroutine::getContext();
     $context['worker'] = $worker;
     $context['worker_id'] = $workerState->workerId;
+    $context['request_start_time'] = $requestStartTime; // FIX (Bug #8)
+
+    // FIX (Bug #9): Register this coroutine as handling a request
+    Monitor::registerRequestCoroutine($cid);
 
     if ($workerState->timerTable) {
-        $workerState->timerTable->set(Coroutine::getCid(), [
+        // FIX (Bug #4): Add error handling for timer table set operation
+        $cid = Coroutine::getCid();
+        $setResult = $workerState->timerTable->set($cid, [
             'worker_pid' => $workerState->workerPid,
             'time' => time(),
             'fd' => $request->fd,
         ]);
+
+        if (!$setResult) {
+            error_log("⚠️ Timer table full! Could not track coroutine #{$cid}. Consider increasing max_timer_table_size.");
+        }
     }
 
     try {
@@ -193,15 +207,20 @@ $server->on('request', function ($request, $response) use ($server, $workerState
         
         // Worker continues! Don't crash, just handle the next request
     } finally {
+        $cid = Coroutine::getCid();
+
         if ($workerState->timerTable) {
-            $workerState->timerTable->del(Coroutine::getCid());
+            $workerState->timerTable->del($cid);
         }
-        
+
+        // FIX (Bug #9): Unregister this request coroutine
+        Monitor::unregisterRequestCoroutine($cid);
+
         // CRITICAL FIX: Return worker to the pool!
         if ($workerState->clientPool && $worker) {
             $workerState->clientPool->push($worker);
         }
-        
+
         // Ensure coroutine context is cleared (Swoole does this automatically, but explicit is safe)
         Context::clear();
     }

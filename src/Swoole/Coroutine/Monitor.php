@@ -3,15 +3,88 @@
 namespace Laravel\Octane\Swoole\Coroutine;
 
 use Swoole\Coroutine;
+use Swoole\Table;
 
 /**
  * Coroutine Monitor
- * 
+ *
  * Provides monitoring and debugging utilities for coroutines.
  * Inspired by Hyperf's monitoring capabilities for production debugging.
+ *
+ * FIX (Bug #9): Added tracking for Octane request coroutines specifically,
+ * separate from Swoole's internal coroutines.
  */
 class Monitor
 {
+    /**
+     * Shared table for tracking active request coroutines across workers.
+     * This is worker-local (not shared memory) since each worker has its own coroutines.
+     */
+    protected static ?array $activeRequestCoroutines = null;
+
+    /**
+     * Register a coroutine as handling an HTTP request.
+     *
+     * @param  int  $cid  Coroutine ID
+     * @return void
+     */
+    public static function registerRequestCoroutine(int $cid): void
+    {
+        if (static::$activeRequestCoroutines === null) {
+            static::$activeRequestCoroutines = [];
+        }
+        static::$activeRequestCoroutines[$cid] = time();
+    }
+
+    /**
+     * Unregister a request coroutine when it completes.
+     *
+     * @param  int  $cid  Coroutine ID
+     * @return void
+     */
+    public static function unregisterRequestCoroutine(int $cid): void
+    {
+        if (static::$activeRequestCoroutines !== null) {
+            unset(static::$activeRequestCoroutines[$cid]);
+        }
+    }
+
+    /**
+     * Get the count of active request coroutines (not internal Swoole coroutines).
+     *
+     * @return int
+     */
+    public static function getActiveRequestCount(): int
+    {
+        if (static::$activeRequestCoroutines === null) {
+            return 0;
+        }
+        return count(static::$activeRequestCoroutines);
+    }
+
+    /**
+     * Get the list of active request coroutine IDs.
+     *
+     * @return array
+     */
+    public static function getActiveRequestCoroutines(): array
+    {
+        if (static::$activeRequestCoroutines === null) {
+            return [];
+        }
+        return array_keys(static::$activeRequestCoroutines);
+    }
+
+    /**
+     * Clear all tracked request coroutines.
+     *
+     * @return void
+     */
+    public static function clearRequestCoroutines(): void
+    {
+        static::$activeRequestCoroutines = [];
+    }
+
     /**
      * Get comprehensive coroutine statistics
      *
@@ -25,12 +98,13 @@ class Monitor
                 'error' => 'Swoole extension not loaded',
             ];
         }
-        
+
         $stats = Coroutine::stats();
-        
+
         return [
             'enabled' => true,
             'active_coroutines' => $stats['coroutine_num'] ?? 0,
+            'active_requests' => static::getActiveRequestCount(), // FIX (Bug #9)
             'peak_coroutines' => $stats['coroutine_peak_num'] ?? 0,
             'event_count' => $stats['event_num'] ?? 0,
             'signal_count' => $stats['signal_listener_num'] ?? 0,
@@ -39,7 +113,7 @@ class Monitor
             'coroutine_stack_size' => $stats['coroutine_stack_size'] ?? 0,
         ];
     }
-    
+
     /**
      * List all active coroutine IDs
      *
@@ -50,11 +124,11 @@ class Monitor
         if (!extension_loaded('swoole')) {
             return [];
         }
-        
+
         $iterator = Coroutine::list();
         return iterator_to_array($iterator);
     }
-    
+
     /**
      * Get backtrace for a specific coroutine
      *
@@ -68,10 +142,10 @@ class Monitor
         if (!extension_loaded('swoole')) {
             return [];
         }
-        
+
         return Coroutine::getBackTrace($cid, $options, $limit);
     }
-    
+
     /**
      * Get detailed info about all active coroutines
      *
@@ -81,17 +155,18 @@ class Monitor
     {
         $coroutines = static::listCoroutines();
         $info = [];
-        
+
         foreach ($coroutines as $cid) {
             $info[$cid] = [
                 'id' => $cid,
+                'is_request' => isset(static::$activeRequestCoroutines[$cid]),
                 'backtrace' => static::getBacktrace($cid, DEBUG_BACKTRACE_IGNORE_ARGS, 5),
             ];
         }
-        
+
         return $info;
     }
-    
+
     /**
      * Check if currently running in a coroutine
      *
@@ -102,10 +177,10 @@ class Monitor
         if (!extension_loaded('swoole')) {
             return false;
         }
-        
+
         return Coroutine::getCid() >= 0;
     }
-    
+
     /**
      * Get current coroutine ID
      *
@@ -116,10 +191,10 @@ class Monitor
         if (!extension_loaded('swoole')) {
             return -1;
         }
-        
+
         return Coroutine::getCid();
     }
-    
+
     /**
      * Get a formatted report of coroutine status
      *
@@ -128,24 +203,25 @@ class Monitor
     public static function getReport(): string
     {
         $stats = static::stats();
-        
+
         if (!$stats['enabled']) {
             return "Coroutine monitoring disabled: {$stats['error']}";
         }
-        
+
         $report = "=== Coroutine Monitor Report ===\n";
-        $report .= "Active Coroutines: {$stats['active_coroutines']}\n";
+        $report .= "Active Coroutines (total): {$stats['active_coroutines']}\n";
+        $report .= "Active Requests (tracked): {$stats['active_requests']}\n";
         $report .= "Peak Coroutines: {$stats['peak_coroutines']}\n";
         $report .= "Event Listeners: {$stats['event_count']}\n";
         $report .= "Signal Listeners: {$stats['signal_count']}\n";
         $report .= "AIO Tasks: {$stats['aio_task_count']}\n";
         $report .= "Current Coroutine ID: " . static::getCurrentId() . "\n";
-        
-        if ($stats['active_coroutines'] > 0) {
-            $report .= "\nActive Coroutine IDs: ";
-            $report .= implode(', ', static::listCoroutines()) . "\n";
+
+        if ($stats['active_requests'] > 0) {
+            $report .= "\nActive Request Coroutine IDs: ";
+            $report .= implode(', ', static::getActiveRequestCoroutines()) . "\n";
         }
-        
+
         return $report;
     }
 }
