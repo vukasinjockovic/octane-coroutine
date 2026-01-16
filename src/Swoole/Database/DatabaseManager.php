@@ -3,6 +3,7 @@
 namespace Laravel\Octane\Swoole\Database;
 
 use Illuminate\Database\DatabaseManager as BaseDatabaseManager;
+use Laravel\Octane\CurrentApplication;
 use Laravel\Octane\Swoole\Coroutine\Context;
 
 class DatabaseManager extends BaseDatabaseManager
@@ -11,6 +12,7 @@ class DatabaseManager extends BaseDatabaseManager
 
     public function connection($name = null)
     {
+        $this->syncApplication();
         $name = $name ?: $this->getDefaultConnection();
 
         // If we are NOT in a coroutine, fallback to parent behavior (standard singleton connection)
@@ -39,6 +41,7 @@ class DatabaseManager extends BaseDatabaseManager
 
     protected function getPool($name)
     {
+        $this->syncApplication();
         if (!isset($this->pools[$name])) {
             $config = $this->configuration($name);
             
@@ -60,6 +63,15 @@ class DatabaseManager extends BaseDatabaseManager
             );
         }
         return $this->pools[$name];
+    }
+
+    protected function syncApplication(): void
+    {
+        $app = CurrentApplication::get();
+
+        if ($app && $app !== $this->app) {
+            $this->setApplication($app);
+        }
     }
 
     public function releaseConnections()
