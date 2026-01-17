@@ -5,8 +5,10 @@ namespace Laravel\Octane\Swoole\Handlers;
 use Laravel\Octane\ApplicationFactory;
 use Laravel\Octane\Stream;
 use Laravel\Octane\Swoole\Coroutine\Context;
+use Laravel\Octane\Swoole\Coroutine\ChannelPoolLock;
 use Laravel\Octane\Swoole\Coroutine\CoordinatorManager;
 use Laravel\Octane\Swoole\Coroutine\FacadeCache;
+use Laravel\Octane\Swoole\Coroutine\WorkerPool;
 use Laravel\Octane\Swoole\SwooleClient;
 use Laravel\Octane\Swoole\SwooleExtension;
 use Laravel\Octane\Swoole\WorkerState;
@@ -151,43 +153,39 @@ class OnWorkerStart
         // Pool size determines concurrent requests per Swoole worker
         // Each pool member is a Worker with its own Laravel app (~50-100MB each)
         // Trade-off: higher = more concurrency but more memory
-        $poolSize = $poolConfig['size'] ?? 10;
-        $minSize = $poolConfig['min_size'] ?? 1;
-        $maxSize = $poolConfig['max_size'] ?? 100;
+        $poolSize = (int) ($poolConfig['size'] ?? 10);
+        $minSize = (int) ($poolConfig['min_size'] ?? 1);
+        $maxSize = (int) ($poolConfig['max_size'] ?? 100);
+
+        if ($minSize < 0) {
+            $minSize = 0;
+        }
+
+        if ($maxSize < $minSize) {
+            $maxSize = $minSize;
+        }
+
+        if ($maxSize < 1) {
+            $maxSize = 1;
+        }
 
         $poolSize = max($minSize, min($maxSize, $poolSize));
 
         error_log("🏊 Creating worker pool with size: {$poolSize} (min: {$minSize}, max: {$maxSize})");
 
-        $this->workerState->clientPool = new Channel($poolSize);
+        $channel = new Channel($maxSize);
+        $poolLock = new ChannelPoolLock(new Channel(1));
+        $workerPool = new WorkerPool(
+            $channel,
+            $minSize,
+            $maxSize,
+            fn (int $poolIndex) => $this->createPoolWorker($server, $workerId, $poolIndex),
+            $poolLock
+        );
+        $workerPool->seed($poolSize);
 
-        // Create pool of Workers, each with its own Application instance
-        for ($i = 0; $i < $poolSize; $i++) {
-            // CRITICAL FIX: Clear Facade resolved instances to prevent state leaks (e.g. Breadcrumbs)
-            \Illuminate\Support\Facades\Facade::clearResolvedInstances();
-
-            // Clear coroutine context to ensure clean state for each worker
-            Context::clear();
-
-            $worker = new Worker(
-                new ApplicationFactory($this->basePath),
-                new SwooleClient
-            );
-
-        $worker->boot([
-            'octane.cacheTable' => $this->workerState->cacheTable,
-            Server::class => $server,
-            WorkerState::class => $this->workerState,
-        ]);
-
-            $this->configureRedisForCoroutineWorker($worker, $i, $workerId);
-
-            // Store worker metadata in context
-            Context::set("worker.{$i}.created_at", time());
-            Context::set("worker.{$i}.pool_index", $i);
-
-            $this->workerState->clientPool->push($worker);
-        }
+        $this->workerState->clientPool = $channel;
+        $this->workerState->workerPool = $workerPool;
 
         // Keep the first worker as the default for backward compatibility
         $this->workerState->worker = $this->workerState->clientPool->pop();
@@ -223,6 +221,38 @@ class OnWorkerStart
         $this->workerState->ready = true;
 
         return $this->workerState->worker;
+    }
+
+    /**
+     * Create a new pooled Worker instance for coroutine handling.
+     *
+     * @param  \Swoole\Http\Server  $server
+     * @param  int  $workerId
+     * @param  int  $poolIndex
+     * @return \Laravel\Octane\Worker
+     */
+    public function createPoolWorker(Server $server, int $workerId, int $poolIndex): Worker
+    {
+        // CRITICAL FIX: Clear Facade resolved instances to prevent state leaks (e.g. Breadcrumbs)
+        \Illuminate\Support\Facades\Facade::clearResolvedInstances();
+
+        // Clear coroutine context to ensure clean state for each worker
+        Context::clear();
+
+        $worker = new Worker(
+            new ApplicationFactory($this->basePath),
+            new SwooleClient
+        );
+
+        $worker->boot([
+            'octane.cacheTable' => $this->workerState->cacheTable,
+            Server::class => $server,
+            WorkerState::class => $this->workerState,
+        ]);
+
+        $this->configureRedisForCoroutineWorker($worker, $poolIndex, $workerId);
+
+        return $worker;
     }
 
     /**

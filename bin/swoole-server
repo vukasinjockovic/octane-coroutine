@@ -96,9 +96,16 @@ $workerState->timerTable = $timerTable;
 $workerState->tables = require __DIR__.'/createSwooleTables.php';
 
 $server->on('workerstart', fn (Server $server, $workerId) =>
-    (fn ($basePath) => (new OnWorkerStart(
-        new SwooleExtension, $basePath, $serverState, $workerState
-    ))($server, $workerId))($bootstrap($serverState))
+    (function (string $basePath) use ($server, $workerId, $serverState, $workerState) {
+        $handler = new OnWorkerStart(
+            new SwooleExtension,
+            $basePath,
+            $serverState,
+            $workerState
+        );
+
+        $handler($server, $workerId);
+    })($bootstrap($serverState))
 );
 
 /*
@@ -136,14 +143,25 @@ $server->on('request', function ($request, $response) use ($server, $workerState
         }
 
         $waitTimeout = (float) $waitTimeout;
-        $popTimeout = ($rejectOnFull || $waitTimeout <= 0) ? 0.001 : $waitTimeout;
+        try {
+            if ($workerState->workerPool) {
+                $worker = $workerState->workerPool->acquire((float) $waitTimeout, (bool) $rejectOnFull);
+            } else {
+                $worker = $workerState->clientPool->pop(0.001);
 
-        $worker = $workerState->clientPool->pop($popTimeout);
-        
-        if ($worker === false) {
+                if ($worker === false && ! $rejectOnFull && $waitTimeout > 0) {
+                    $worker = $workerState->clientPool->pop((float) $waitTimeout);
+                }
+            }
+        } catch (\Throwable $e) {
+            error_log("❌ Failed to acquire worker from pool: " . $e->getMessage());
+            $worker = null;
+        }
+
+        if (! $worker) {
             $errCode = $workerState->clientPool->errCode;
             error_log("❌ Pool pop failed! ErrCode: {$errCode}, Stats: " . json_encode($workerState->clientPool->stats()));
-            
+
             // Timeout occurred - pool is exhausted and queue is full/slow
             $response->status((int) $overloadStatus);
             $response->header('Content-Type', 'application/json');
@@ -154,7 +172,8 @@ $server->on('request', function ($request, $response) use ($server, $workerState
                 'error' => 'Service Unavailable',
                 'message' => 'Server is too busy, please try again later',
                 'debug_pool_stats' => $workerState->clientPool->stats(),
-                'debug_err_code' => $errCode
+                'debug_err_code' => $errCode,
+                'debug_worker_pool' => $workerState->workerPool ? $workerState->workerPool->stats() : null,
             ]));
             return;
         }
@@ -231,8 +250,19 @@ $server->on('request', function ($request, $response) use ($server, $workerState
         Monitor::unregisterRequestCoroutine($cid);
 
         // CRITICAL FIX: Return worker to the pool!
-        if ($workerState->clientPool && $worker) {
-            $workerState->clientPool->push($worker);
+        if ($workerState->workerPool && $worker) {
+            try {
+                $kept = $workerState->workerPool->release($worker);
+            } catch (\Throwable $e) {
+                $kept = false;
+                error_log('⚠️ Worker pool release failed - terminating worker: '.$e->getMessage());
+            }
+
+            if (! $kept) {
+                $worker->terminate();
+            }
+        } elseif ($workerState->clientPool && $worker) {
+            $workerState->clientPool->push($worker, 0.001);
         }
 
         // Ensure coroutine context is cleared (Swoole does this automatically, but explicit is safe)
