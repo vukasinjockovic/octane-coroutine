@@ -2,7 +2,9 @@
 
 namespace Laravel\Octane\Listeners;
 
+use Illuminate\Container\Container;
 use Illuminate\Pagination\PaginationState;
+use Laravel\Octane\Swoole\Coroutine\CoroutineApplication;
 
 class GiveNewRequestInstanceToPaginator
 {
@@ -13,6 +15,13 @@ class GiveNewRequestInstanceToPaginator
      */
     public function handle($event): void
     {
+        $container = Container::getInstance();
+
+        if ($container instanceof CoroutineApplication) {
+            PaginationState::resolveUsing($container);
+            return;
+        }
+
         PaginationState::resolveUsing($event->sandbox);
     }
 }
