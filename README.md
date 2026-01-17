@@ -253,6 +253,7 @@ This fork adds a new `pool` configuration section to `config/octane.php`:
         'size' => 100,      // Applications per worker
         'min_size' => 1,    // Minimum pool size
         'max_size' => 1000, // Maximum pool size
+        'idle_timeout' => 10, // Seconds before trimming idle workers
     ],
 ],
 ```
@@ -526,6 +527,7 @@ For 10K req/sec with 100ms average response time:
         'size' => 200,                  // 200 apps per worker = 1,600 total capacity
         'min_size' => 10,
         'max_size' => 500,
+        'idle_timeout' => 10,
     ],
 ],
 ```

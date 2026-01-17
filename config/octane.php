@@ -188,6 +188,7 @@ return [
             'size' => env('OCTANE_POOL_SIZE', 50),
             'min_size' => env('OCTANE_POOL_MIN_SIZE', 1),
             'max_size' => env('OCTANE_POOL_MAX_SIZE', 1000),
+            'idle_timeout' => env('OCTANE_POOL_IDLE_TIMEOUT', 10),
             'wait_timeout' => env('OCTANE_POOL_WAIT_TIMEOUT', 30.0),
             'reject_on_full' => env('OCTANE_POOL_REJECT_ON_FULL', false),
             'overload_status' => env('OCTANE_POOL_OVERLOAD_STATUS', 503),

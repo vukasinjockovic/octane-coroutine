@@ -69,7 +69,7 @@ class WorkerPoolTest extends TestCase
         $this->assertSame(0, $results['stats']['available']);
     }
 
-    public function test_release_shrinks_pool_when_idle_above_min(): void
+    public function test_acquire_shrinks_pool_when_idle_above_min(): void
     {
         $results = [];
 
@@ -79,20 +79,24 @@ class WorkerPoolTest extends TestCase
                 1,
                 3,
                 fn (int $index) => new TestWorker($index),
-                new ChannelPoolLock(new Channel(1))
+                new ChannelPoolLock(new Channel(1)),
+                1
             );
 
             $pool->seed(3);
 
+            \Swoole\Coroutine::sleep(1.1);
+
             $workerA = $pool->acquire(0.001, true);
-            $pool->acquire(0.001, true);
+            $results['stats_after_acquire'] = $pool->stats();
 
             $results['kept'] = $pool->release($workerA);
             $results['stats'] = $pool->stats();
         });
 
-        $this->assertFalse($results['kept']);
-        $this->assertSame(2, $results['stats']['current_size']);
+        $this->assertTrue($results['kept']);
+        $this->assertSame(1, $results['stats_after_acquire']['current_size']);
+        $this->assertSame(1, $results['stats']['current_size']);
         $this->assertSame(1, $results['stats']['available']);
     }
 

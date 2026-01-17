@@ -156,6 +156,7 @@ class OnWorkerStart
         $poolSize = (int) ($poolConfig['size'] ?? 10);
         $minSize = (int) ($poolConfig['min_size'] ?? 1);
         $maxSize = (int) ($poolConfig['max_size'] ?? 100);
+        $idleTimeout = (int) ($poolConfig['idle_timeout'] ?? 10);
 
         if ($minSize < 0) {
             $minSize = 0;
@@ -180,7 +181,8 @@ class OnWorkerStart
             $minSize,
             $maxSize,
             fn (int $poolIndex) => $this->createPoolWorker($server, $workerId, $poolIndex),
-            $poolLock
+            $poolLock,
+            $idleTimeout
         );
         $workerPool->seed($poolSize);
 
@@ -233,11 +235,10 @@ class OnWorkerStart
      */
     public function createPoolWorker(Server $server, int $workerId, int $poolIndex): Worker
     {
-        // CRITICAL FIX: Clear Facade resolved instances to prevent state leaks (e.g. Breadcrumbs)
-        \Illuminate\Support\Facades\Facade::clearResolvedInstances();
-
-        // Clear coroutine context to ensure clean state for each worker
-        Context::clear();
+        // NOTE: Do NOT clear Facade::clearResolvedInstances() or Context::clear() here!
+        // This method can be called during dynamic pool growth (while requests are running),
+        // and clearing global state would break those running requests.
+        // Each Worker has its own isolated Application instance anyway.
 
         $worker = new Worker(
             new ApplicationFactory($this->basePath),
