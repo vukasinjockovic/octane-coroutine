@@ -39,18 +39,13 @@ class OnWorkerStart
      */
     public function __invoke($server, int $workerId)
     {
-        // Log detailed worker start info with actual Swoole settings
-        $maxRequest = $server->setting['max_request'] ?? 'not set';
-        $reloadAsync = isset($server->setting['reload_async']) && $server->setting['reload_async'] ? 'true' : 'false';
-        $workerNum = $server->setting['worker_num'] ?? 'unknown';
-        $isTaskWorker = $workerId >= ($workerNum);
-        
-        $workerType = $isTaskWorker ? 'TASK WORKER' : 'WORKER';
-        // error_log("{$workerType} #{$workerId} STARTING (max_request: {$maxRequest}, reload_async: {$reloadAsync})");
+        // Enable safe coroutine hooks — excludes SWOOLE_HOOK_FILE and SWOOLE_HOOK_UNIX
+        // which cause deadlocks under concurrent request load (see bootstrap.php).
+        $safeHooks = SWOOLE_HOOK_TCP | SWOOLE_HOOK_UDP | SWOOLE_HOOK_SSL | SWOOLE_HOOK_TLS
+            | SWOOLE_HOOK_SLEEP | SWOOLE_HOOK_PROC | SWOOLE_HOOK_NATIVE_CURL
+            | SWOOLE_HOOK_BLOCKING_FUNCTION | SWOOLE_HOOK_SOCKETS;
+        \Swoole\Runtime::enableCoroutine($safeHooks);
 
-        // Enable coroutine hooks to make blocking functions (sleep, file_get_contents, etc.) coroutine-safe
-        \Swoole\Runtime::enableCoroutine(SWOOLE_HOOK_ALL);
-        
         if ($this->shouldClearOpcodeCache()) {
             $this->clearOpcodeCache();
         }
@@ -71,8 +66,6 @@ class OnWorkerStart
                 $isTaskWorker ? 'task worker process' : 'worker process',
             );
         }
-
-        // error_log("{$workerType} #{$workerId} (PID: {$this->workerState->workerPid}) initialized and ready");
     }
 
     /**
@@ -111,7 +104,6 @@ class OnWorkerStart
      */
     protected function bootTaskWorker($server, int $workerId)
     {
-        // error_log("Booting task worker #{$workerId} with single instance (no pool needed)");
 
         // Clear Facade resolved instances
         \Illuminate\Support\Facades\Facade::clearResolvedInstances();
@@ -135,7 +127,6 @@ class OnWorkerStart
         $this->workerState->client = $worker->getClient() ?? new SwooleClient;
         $this->workerState->ready = true;
 
-        // error_log("Task worker #{$workerId} initialized successfully");
 
         return $worker;
     }
@@ -172,7 +163,6 @@ class OnWorkerStart
 
         $poolSize = max($minSize, min($maxSize, $poolSize));
 
-        // error_log("Creating worker pool with size: {$poolSize} (min: {$minSize}, max: {$maxSize})");
 
         $channel = new Channel($maxSize);
         $poolLock = new ChannelPoolLock(new Channel(1));
@@ -211,7 +201,6 @@ class OnWorkerStart
         Context::set('octane.worker_pid', $this->workerState->workerPid);
         Context::set('octane.pool_size', $poolSize);
 
-        // error_log("Worker pool created successfully with {$poolSize} instances");
 
         $this->warnIfDatabasePoolMinExceedsMaxConnections($this->workerState->worker, $server);
 
@@ -256,10 +245,14 @@ class OnWorkerStart
     /**
      * Ensure Redis connections are safe for concurrent coroutines.
      *
-     * Persistent phpredis connections are shared across instances in the same
-     * process when the persistent_id is identical. In coroutine mode this can
-     * cause cross-request contention or hangs. We assign a unique persistent_id
-     * per pool worker to prevent shared sockets.
+     * phpredis persistent connections (pconnect) share sockets across coroutines
+     * within the same Swoole worker process. When two coroutines use the same
+     * persistent connection concurrently, RESP protocol responses get interleaved,
+     * causing one coroutine to read another's response — leading to deadlocks.
+     *
+     * Fix: Disable persistent connections entirely in coroutine mode. With
+     * SWOOLE_HOOK_ALL enabled, each connect() call creates a coroutine-local
+     * socket automatically, providing proper isolation without persistence.
      *
      * @param  \Laravel\Octane\Worker  $worker
      * @param  int  $poolIndex
@@ -281,22 +274,37 @@ class OnWorkerStart
             return;
         }
 
+        // Disable persistent connections globally — they are NOT coroutine-safe.
+        // phpredis pconnect() caches connections at the process level by persistent_id.
+        // Even with unique persistent_ids, the C-level connection lookup in phpredis
+        // can return a socket owned by a different coroutine, causing RESP interleaving.
+        if (isset($redisConfig['options']) && is_array($redisConfig['options'])) {
+            $redisConfig['options']['persistent'] = false;
+            unset($redisConfig['options']['persistent_id']);
+        }
+
         $connectionNames = array_filter(array_keys($redisConfig), function ($name) {
             return ! in_array($name, ['client', 'options', 'clusters'], true);
         });
 
-        $suffix = 'octane_worker_'.$workerId.'_pool_'.$poolIndex.'_'.getmypid();
-        $updated = false;
-
+        // Also disable persistent on per-connection level
         foreach ($connectionNames as $name) {
             if (! is_array($redisConfig[$name])) {
                 continue;
             }
 
-            if (($redisConfig[$name]['persistent'] ?? false) === true) {
-                $baseId = $redisConfig[$name]['persistent_id'] ?? "octane_redis_{$name}";
-                $redisConfig[$name]['persistent_id'] = $baseId.'_'.$suffix;
-                $updated = true;
+            $redisConfig[$name]['persistent'] = false;
+            unset($redisConfig[$name]['persistent_id']);
+        }
+
+        $config->set('database.redis', $redisConfig);
+
+        // Purge any already-resolved Redis connections so they reconnect
+        // with the new (non-persistent) configuration
+        if ($app->bound('redis')) {
+            $redis = $app->make('redis');
+            foreach ($connectionNames as $name) {
+                $redis->purge($name);
             }
         }
 
@@ -304,17 +312,6 @@ class OnWorkerStart
             empty($config->get('session.connection')) &&
             isset($redisConfig['session'])) {
             $config->set('session.connection', 'session');
-        }
-
-        if ($updated) {
-            $config->set('database.redis', $redisConfig);
-
-            if ($app->bound('redis')) {
-                $redis = $app->make('redis');
-                foreach ($connectionNames as $name) {
-                    $redis->purge($name);
-                }
-            }
         }
     }
 

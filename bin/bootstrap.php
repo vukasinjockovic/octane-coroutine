@@ -13,7 +13,17 @@ Swoole\Coroutine::set([
     'max_coroutine' => 100000,
 ]);
 
-Runtime::enableCoroutine(SWOOLE_HOOK_ALL);
+// Enable coroutine hooks for non-blocking I/O.
+// SWOOLE_HOOK_FILE (256) and SWOOLE_HOOK_UNIX (8) cause deadlocks under concurrency:
+// - FILE hooks fopen/fread/file_get_contents — Laravel reads config/views/lang files on every
+//   request, and hooked file I/O creates coroutine scheduling points inside non-reentrant code
+//   paths, causing workers to deadlock at ~25 concurrent connections.
+// - UNIX hooks Unix domain socket operations with similar deadlock behavior.
+// Safe hooks: TCP, UDP, SSL, TLS, SLEEP, PROC, NATIVE_CURL, BLOCKING_FUNCTION, SOCKETS.
+$safeHooks = SWOOLE_HOOK_TCP | SWOOLE_HOOK_UDP | SWOOLE_HOOK_SSL | SWOOLE_HOOK_TLS
+    | SWOOLE_HOOK_SLEEP | SWOOLE_HOOK_PROC | SWOOLE_HOOK_NATIVE_CURL
+    | SWOOLE_HOOK_BLOCKING_FUNCTION | SWOOLE_HOOK_SOCKETS;
+Runtime::enableCoroutine($safeHooks);
 
 /*
 |--------------------------------------------------------------------------

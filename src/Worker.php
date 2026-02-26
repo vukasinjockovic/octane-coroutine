@@ -47,9 +47,6 @@ class Worker implements WorkerContract
      */
     public function boot(array $initialInstances = []): void
     {
-        // First we will create an instance of the Laravel application that can serve as
-        // the base container instance we will clone from on every request. This will
-        // also perform the initial bootstrapping that's required by the framework.
         $this->app = $app = $this->appFactory->createApplication(
             array_merge(
                 $initialInstances,
@@ -120,20 +117,38 @@ class Worker implements WorkerContract
         } catch (Throwable $e) {
             $this->handleWorkerError($e, $sandbox, $request, $context, $responded);
         } finally {
+            if (class_exists(Context::class) && Coroutine::getCid() > 0) {
+                // Release database connections BEFORE flush — flush() clears all
+                // bindings/instances making $sandbox->bound('db') return false.
+                // We release from the root app's DB manager which owns the pools.
+                try {
+                    $db = $this->app->make('db');
+                    if (method_exists($db, 'releaseConnections')) {
+                        $db->releaseConnections();
+                    }
+                } catch (\Throwable $e) {
+                    // ignore
+                }
+
+                // Release Redis connections — same issue as DB: each coroutine
+                // gets its own connection via CoroutineRedisManager/Context.
+                // Must disconnect before Context::clear() destroys the references.
+                try {
+                    $redis = $this->app->make('redis');
+                    if (method_exists($redis, 'releaseConnections')) {
+                        $redis->releaseConnections();
+                    }
+                } catch (\Throwable $e) {
+                    // ignore
+                }
+            }
+
             $sandbox->flush();
 
             $this->app->make('view.engine.resolver')->forget('blade');
             $this->app->make('view.engine.resolver')->forget('php');
 
             if (class_exists(Context::class) && Coroutine::getCid() > 0) {
-                // Release database connections
-                if ($sandbox->bound('db')) {
-                    $db = $sandbox->make('db');
-                    if (method_exists($db, 'releaseConnections')) {
-                        $db->releaseConnections();
-                    }
-                }
-
                 Context::clear();
             } else {
                 CurrentApplication::set($this->app);
@@ -156,9 +171,6 @@ class Worker implements WorkerContract
     {
         $result = false;
 
-        // We will clone the application instance so that we have a clean copy to switch
-        // back to once the request has been handled. This allows us to easily delete
-        // certain instances that got resolved / mutated during a previous request.
         CurrentApplication::set($sandbox = clone $this->app);
 
         try {
@@ -174,9 +186,6 @@ class Worker implements WorkerContract
         } finally {
             $sandbox->flush();
 
-            // After the request handling process has completed we will unset some variables
-            // plus reset the current application state back to its original state before
-            // it was cloned. Then we will be ready for the next worker iteration loop.
             unset($sandbox);
 
             CurrentApplication::set($this->app);
@@ -225,10 +234,6 @@ class Worker implements WorkerContract
 
     /**
      * Invoke the request handled callbacks.
-     *
-     * @param  \Illuminate\Http\Request  $request
-     * @param  \Symfony\Component\HttpFoundation\Response  $response
-     * @param  \Illuminate\Foundation\Application  $sandbox
      */
     protected function invokeRequestHandledCallbacks($request, $response, $sandbox): void
     {

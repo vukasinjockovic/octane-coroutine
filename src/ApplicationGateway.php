@@ -11,6 +11,7 @@ use Laravel\Octane\Events\RequestReceived;
 use Laravel\Octane\Events\RequestTerminated;
 use Laravel\Octane\Facades\Octane;
 use Symfony\Component\HttpFoundation\Response;
+use Swoole\Coroutine;
 
 class ApplicationGateway
 {
@@ -20,6 +21,18 @@ class ApplicationGateway
     {
     }
 
+    private static function gState(string $state): void
+    {
+        $cid = Coroutine::getCid();
+        if ($cid > 0) {
+            $ctx = Coroutine::getContext($cid);
+            if ($ctx) {
+                $ctx['_debug_state'] = $state;
+                $ctx['_debug_ts'] = microtime(true);
+            }
+        }
+    }
+
     /**
      * Handle an incoming request.
      */
@@ -27,13 +40,23 @@ class ApplicationGateway
     {
         $request->enableHttpMethodParameterOverride();
 
+        self::gState("gw_event_dispatch:{$request->getPathInfo()}");
+
         $this->dispatchEvent($this->sandbox, new RequestReceived($this->app, $this->sandbox, $request));
 
         if (Octane::hasRouteFor($request->getMethod(), '/'.$request->path())) {
+            self::gState("gw_octane_route:{$request->getPathInfo()}");
             return Octane::invokeRoute($request, $request->getMethod(), '/'.$request->path());
         }
 
-        return tap($this->sandbox->make(Kernel::class)->handle($request), function ($response) use ($request) {
+        self::gState("gw_resolve_kernel:{$request->getPathInfo()}");
+
+        $kernel = $this->sandbox->make(Kernel::class);
+
+        self::gState("gw_kernel_handle:{$request->getPathInfo()}");
+
+        return tap($kernel->handle($request), function ($response) use ($request) {
+            self::gState("gw_kernel_done:{$request->getPathInfo()}");
             $this->dispatchEvent($this->sandbox, new RequestHandled($this->sandbox, $request, $response));
         });
     }

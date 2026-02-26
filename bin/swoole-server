@@ -96,7 +96,7 @@ $workerState->timerTable = $timerTable;
 $workerState->tables = require __DIR__.'/createSwooleTables.php';
 
 $server->on('workerstart', fn (Server $server, $workerId) =>
-    (function (string $basePath) use ($server, $workerId, $serverState, $workerState) {
+    (function (string $basePath) use ($server, $workerId, $serverState, $workerState, $timerTable) {
         $handler = new OnWorkerStart(
             new SwooleExtension,
             $basePath,
@@ -122,7 +122,6 @@ $server->on('workerstart', fn (Server $server, $workerId) =>
 $server->on('request', function ($request, $response) use ($server, $workerState, $serverState) {
     $appDebug = filter_var($_ENV['APP_DEBUG'] ?? getenv('APP_DEBUG') ?: false, FILTER_VALIDATE_BOOLEAN);
 
-    // Store request start time in coroutine context for per-request metrics.
     $requestStartTime = microtime(true);
 
     // Wait for worker to be fully initialized
@@ -132,6 +131,7 @@ $server->on('request', function ($request, $response) use ($server, $workerState
 
     // Get a worker from the pool with a timeout (Queuing mechanism)
     $worker = null;
+
     if ($workerState->clientPool) {
         $poolConfig = $serverState['octaneConfig']['swoole']['pool'] ?? [];
         $waitTimeout = $poolConfig['wait_timeout'] ?? 30.0;
@@ -144,6 +144,7 @@ $server->on('request', function ($request, $response) use ($server, $workerState
         }
 
         $waitTimeout = (float) $waitTimeout;
+
         try {
             if ($workerState->workerPool) {
                 $worker = $workerState->workerPool->acquire((float) $waitTimeout, (bool) $rejectOnFull);
@@ -155,34 +156,33 @@ $server->on('request', function ($request, $response) use ($server, $workerState
                 }
             }
         } catch (\Throwable $e) {
-            // error_log("Failed to acquire worker from pool: " . $e->getMessage());
+            error_log("[ACQUIRE_ERR] " . $e->getMessage());
             $worker = null;
         }
 
         if (! $worker) {
-            // error_log("Pool exhausted, returning {$overloadStatus}. Stats: " . json_encode($workerState->workerPool ? $workerState->workerPool->stats() : $workerState->clientPool->stats()));
-
-            // Timeout occurred - pool is exhausted and queue is full/slow
-            $response->status((int) $overloadStatus);
-            $response->header('Content-Type', 'application/json');
-            if (is_numeric($retryAfter) && (int) $retryAfter > 0) {
-                $response->header('Retry-After', (string) $retryAfter);
+            // Pool exhausted — send 503
+            if ($response->isWritable()) {
+                $response->status((int) $overloadStatus);
+                $response->header('Content-Type', 'application/json');
+                if (is_numeric($retryAfter) && (int) $retryAfter > 0) {
+                    $response->header('Retry-After', (string) $retryAfter);
+                }
+                $body = ['error' => 'Service Unavailable'];
+                if ($appDebug) {
+                    $poolStats = $workerState->workerPool ? $workerState->workerPool->stats() : [];
+                    $body['debug'] = ['pool_stats' => $poolStats];
+                }
+                try {
+                    $response->end(json_encode($body));
+                } catch (\Throwable $e) {
+                    // ignore
+                }
             }
-            $body = [
-                'error' => 'Service Unavailable',
-                'message' => 'Server is too busy, please try again later',
-            ];
-            if ($appDebug) {
-                $body['debug'] = [
-                    'pool_stats' => $workerState->workerPool ? $workerState->workerPool->stats() : null,
-                    'channel_stats' => $workerState->clientPool ? $workerState->clientPool->stats() : null,
-                ];
-            }
-            $response->end(json_encode($body));
             return;
         }
     } else {
-        // Fallback if pool not initialized (shouldn't happen with new OnWorkerStart)
+        // Fallback if pool not initialized
         $worker = $workerState->worker;
     }
 
@@ -195,56 +195,41 @@ $server->on('request', function ($request, $response) use ($server, $workerState
     Monitor::registerRequestCoroutine($cid);
 
     if ($workerState->timerTable) {
-        $cid = Coroutine::getCid();
-        $setResult = $workerState->timerTable->set($cid, [
+        $workerState->timerTable->set($cid, [
             'worker_pid' => $workerState->workerPid,
             'time' => time(),
             'fd' => $request->fd,
         ]);
-
-        if (!$setResult) {
-            // error_log("Timer table full! Could not track coroutine #{$cid}. Consider increasing max_timer_table_size.");
-        }
     }
 
     try {
-        $worker->handle(...$worker->getClient()->marshalRequest(new RequestContext([
+        $marshaledArgs = $worker->getClient()->marshalRequest(new RequestContext([
             'swooleRequest' => $request,
             'swooleResponse' => $response,
             'publicPath' => $serverState['publicPath'],
             'octaneConfig' => $serverState['octaneConfig'],
-        ])));
+        ]));
+        $worker->handle(...$marshaledArgs);
     } catch (\Throwable $e) {
-        // Catch all exceptions to prevent worker crashes — log and send 500 instead.
-        // error_log("CRITICAL ERROR in Worker #{$workerState->workerId} (Coroutine #" . Coroutine::getCid() . "): " . $e->getMessage());
-        // error_log("   File: {$e->getFile()}:{$e->getLine()}");
-        
+        error_log("[HANDLE_ERR] " . get_class($e) . ": {$e->getMessage()} at {$e->getFile()}:{$e->getLine()}");
+
         // Send 500 error response if not already sent
-        if (!$response->isWritable()) {
-            // error_log("Response already sent, cannot send error response");
-        } else {
+        if ($response->isWritable()) {
             try {
                 $response->status(500);
                 $response->header('Content-Type', 'application/json');
-                $body = [
-                    'error' => 'Internal Server Error',
-                    'message' => 'An error occurred while processing your request',
-                ];
+                $body = ['error' => 'Internal Server Error'];
                 if ($appDebug) {
                     $body['debug'] = [
                         'exception' => $e->getMessage(),
                         'file' => $e->getFile() . ':' . $e->getLine(),
-                        'worker_id' => $workerState->workerId,
-                        'coroutine_id' => Coroutine::getCid(),
                     ];
                 }
                 $response->end(json_encode($body));
             } catch (\Throwable $responseError) {
-                // error_log("Failed to send error response: " . $responseError->getMessage());
+                // ignore
             }
         }
-        
-        // Worker continues! Don't crash, just handle the next request
     } finally {
         $cid = Coroutine::getCid();
 
@@ -254,13 +239,12 @@ $server->on('request', function ($request, $response) use ($server, $workerState
 
         Monitor::unregisterRequestCoroutine($cid);
 
-        // Return worker to the pool so it remains available for subsequent requests.
+        // Return worker to the pool
         if ($workerState->workerPool && $worker) {
             try {
                 $kept = $workerState->workerPool->release($worker);
             } catch (\Throwable $e) {
                 $kept = false;
-                // error_log('Worker pool release failed - terminating worker: '.$e->getMessage());
             }
 
             if (! $kept) {
@@ -270,7 +254,6 @@ $server->on('request', function ($request, $response) use ($server, $workerState
             $workerState->clientPool->push($worker, 0.001);
         }
 
-        // Ensure coroutine context is cleared (Swoole does this automatically, but explicit is safe)
         Context::clear();
     }
 });
@@ -287,7 +270,7 @@ $server->on('request', function ($request, $response) use ($server, $workerState
 */
 
 $server->on('task', fn (Server $server, int $taskId, int $fromWorkerId, $data) =>
-    $workerState->worker 
+    $workerState->worker
         ? ($data === 'octane-tick'
             ? $workerState->worker->handleTick()
             : $workerState->worker->handleTask($data))
@@ -308,7 +291,6 @@ $server->on('finish', fn (Server $server, int $taskId, $result) => $result);
 */
 
 $server->on('workerstop', function ($server, $workerId) use ($workerState, $serverState) {
-    // Use the new graceful shutdown handler
     (new OnWorkerStop(
         $serverState['octaneConfig']['swoole']['shutdown_timeout'] ?? 30
     ))($server, $workerId);

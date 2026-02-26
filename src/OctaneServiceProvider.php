@@ -47,6 +47,15 @@ class OctaneServiceProvider extends ServiceProvider
             return new \Laravel\Octane\Swoole\Database\DatabaseManager($app, $app['db.factory']);
         });
 
+        $this->app->singleton('redis', function ($app) {
+            $config = $app->make('config')->get('database.redis', []);
+            $driver = $config['client'] ?? 'predis';
+
+            return new \Laravel\Octane\Swoole\Redis\CoroutineRedisManager(
+                $app, $driver, $config
+            );
+        });
+
         $this->app->bind(RoadRunnerServerProcessInspector::class, function ($app) {
             return new RoadRunnerServerProcessInspector(
                 $app->make(RoadRunnerServerStateFile::class),
