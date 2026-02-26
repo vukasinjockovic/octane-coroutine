@@ -37,7 +37,7 @@ class DatabasePool
             try {
                 $this->channel->push($this->createConnection());
             } catch (Throwable $e) {
-                error_log("❌ Failed to create initial pool connection: " . $e->getMessage());
+                // error_log("Failed to create initial pool connection: " . $e->getMessage());
             }
         }
     }
@@ -91,12 +91,12 @@ class DatabasePool
             $pushed = $this->channel->push($connection, $pushTimeout);
 
             if (!$pushed) {
-                error_log("⚠️ DB pool release timeout - closing connection instead");
+                // error_log("DB pool release timeout - closing connection instead");
                 $this->closeConnection($connection);
                 $this->currentConnections--;
             }
         } catch (Throwable $e) {
-            error_log("❌ Error releasing connection to pool: " . $e->getMessage());
+            // error_log("Error releasing connection to pool: " . $e->getMessage());
             // Try to close the connection to prevent leaks
             $this->closeConnection($connection);
             $this->currentConnections--;
@@ -115,7 +115,7 @@ class DatabasePool
                 $pdo = $connection->getPdo();
 
                 if ($pdo && $pdo->inTransaction()) {
-                    error_log("⚠️ Rolling back uncommitted transaction before returning to pool");
+                    // error_log("Rolling back uncommitted transaction before returning to pool");
                     $pdo->rollBack();
                 }
 
@@ -130,8 +130,7 @@ class DatabasePool
                         $pdo->exec('SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ');
                         $pdo->exec('SET autocommit = 1');
                     } catch (Throwable $e) {
-                        // Non-critical, log and continue
-                        error_log("⚠️ Could not reset MySQL session: " . $e->getMessage());
+                        // error_log("Could not reset MySQL session: " . $e->getMessage());
                     }
                 }
 
@@ -140,13 +139,12 @@ class DatabasePool
                     try {
                         $pdo->exec('RESET ALL');
                     } catch (Throwable $e) {
-                        error_log("⚠️ Could not reset PostgreSQL session: " . $e->getMessage());
+                        // error_log("Could not reset PostgreSQL session: " . $e->getMessage());
                     }
                 }
             }
         } catch (Throwable $e) {
-            error_log("❌ Error resetting connection state: " . $e->getMessage());
-            // If reset fails, the connection may be in a bad state
+            // error_log("Error resetting connection state: " . $e->getMessage());
             throw $e;
         }
     }
@@ -161,7 +159,7 @@ class DatabasePool
                 $connection->disconnect();
             }
         } catch (Throwable $e) {
-            error_log("⚠️ Error closing connection: " . $e->getMessage());
+            // error_log("Error closing connection: " . $e->getMessage());
         }
     }
 

@@ -47,12 +47,7 @@ class OnServerStart
                     $server->task('octane-tick');
                 });
             } else {
-                // Log warning if tick is enabled but no task workers available
-                error_log(
-                    '⚠️  Octane tick is enabled but task_worker_num is 0. ' .
-                    'Tick events will not be dispatched. ' .
-                    'Either disable tick in config/octane.php or start with --task-workers=1'
-                );
+                // error_log("Octane tick enabled but task_worker_num is 0 — tick events will not be dispatched");
             }
         }
 

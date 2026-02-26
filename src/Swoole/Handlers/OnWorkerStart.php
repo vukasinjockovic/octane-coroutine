@@ -46,8 +46,8 @@ class OnWorkerStart
         $isTaskWorker = $workerId >= ($workerNum);
         
         $workerType = $isTaskWorker ? 'TASK WORKER' : 'WORKER';
-        error_log("🚀 {$workerType} #{$workerId} STARTING (max_request: {$maxRequest}, reload_async: {$reloadAsync})");
-        
+        // error_log("{$workerType} #{$workerId} STARTING (max_request: {$maxRequest}, reload_async: {$reloadAsync})");
+
         // Enable coroutine hooks to make blocking functions (sleep, file_get_contents, etc.) coroutine-safe
         \Swoole\Runtime::enableCoroutine(SWOOLE_HOOK_ALL);
         
@@ -71,8 +71,8 @@ class OnWorkerStart
                 $isTaskWorker ? 'task worker process' : 'worker process',
             );
         }
-        
-        error_log("✅ {$workerType} #{$workerId} (PID: {$this->workerState->workerPid}) initialized and ready!");
+
+        // error_log("{$workerType} #{$workerId} (PID: {$this->workerState->workerPid}) initialized and ready");
     }
 
     /**
@@ -111,7 +111,7 @@ class OnWorkerStart
      */
     protected function bootTaskWorker($server, int $workerId)
     {
-        error_log("📋 Booting task worker #{$workerId} with single instance (no pool needed)");
+        // error_log("Booting task worker #{$workerId} with single instance (no pool needed)");
 
         // Clear Facade resolved instances
         \Illuminate\Support\Facades\Facade::clearResolvedInstances();
@@ -135,7 +135,7 @@ class OnWorkerStart
         $this->workerState->client = $worker->getClient() ?? new SwooleClient;
         $this->workerState->ready = true;
 
-        error_log("✅ Task worker #{$workerId} initialized successfully");
+        // error_log("Task worker #{$workerId} initialized successfully");
 
         return $worker;
     }
@@ -172,7 +172,7 @@ class OnWorkerStart
 
         $poolSize = max($minSize, min($maxSize, $poolSize));
 
-        error_log("🏊 Creating worker pool with size: {$poolSize} (min: {$minSize}, max: {$maxSize})");
+        // error_log("Creating worker pool with size: {$poolSize} (min: {$minSize}, max: {$maxSize})");
 
         $channel = new Channel($maxSize);
         $poolLock = new ChannelPoolLock(new Channel(1));
@@ -211,7 +211,7 @@ class OnWorkerStart
         Context::set('octane.worker_pid', $this->workerState->workerPid);
         Context::set('octane.pool_size', $poolSize);
 
-        error_log("✅ Worker pool created successfully with {$poolSize} instances");
+        // error_log("Worker pool created successfully with {$poolSize} instances");
 
         $this->warnIfDatabasePoolMinExceedsMaxConnections($this->workerState->worker, $server);
 

@@ -57,9 +57,13 @@ class Coordinator
         }
         
         $this->resumed = true;
-        
-        // Push to channel to wake up waiting coroutines
-        // Using errSilent to avoid "channel is full" errors
+
+        // Guard: Channel::push() requires coroutine context.
+        // onWorkerStop runs outside coroutine context, so skip the push.
+        if (\Swoole\Coroutine::getCid() < 0) {
+            return;
+        }
+
         $this->channel->push(true);
     }
     

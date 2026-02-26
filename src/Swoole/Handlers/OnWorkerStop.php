@@ -40,50 +40,35 @@ class OnWorkerStop
     {
         $workerType = $workerId >= ($server->setting['worker_num'] ?? 0) ? 'TASK WORKER' : 'WORKER';
 
-        error_log("🛑 {$workerType} #{$workerId} beginning graceful shutdown...");
+        // error_log("{$workerType} #{$workerId} beginning graceful shutdown...");
 
         // Signal that worker is exiting - allows in-flight coroutines to check
         CoordinatorManager::until(CoordinatorManager::WORKER_EXIT)->resume();
 
-        $initialRequests = Monitor::getActiveRequestCount();
+        // onWorkerStop may run outside coroutine context (e.g. during
+        // max_request restart). Coroutine::sleep() and Channel ops require
+        // coroutine context. If we're not in a coroutine, skip the wait loop.
+        $inCoroutine = Coroutine::getCid() >= 0;
 
-        if ($initialRequests > 0) {
-            error_log("⏳ {$workerType} #{$workerId} waiting for {$initialRequests} active requests to complete...");
-        }
+        if ($inCoroutine) {
+            $initialRequests = Monitor::getActiveRequestCount();
+            // error_log("{$workerType} #{$workerId} waiting for {$initialRequests} active requests...");
 
-        // Wait for active requests to complete (with timeout)
-        $waited = 0;
-        $checkInterval = 0.1; // Check every 100ms
+            $waited = 0;
+            $checkInterval = 0.1;
 
-        while ($waited < $this->maxShutdownWait) {
-            $activeRequests = Monitor::getActiveRequestCount();
+            while ($waited < $this->maxShutdownWait) {
+                $activeRequests = Monitor::getActiveRequestCount();
 
-            // If no more request coroutines, we're done
-            if ($activeRequests === 0) {
-                break;
-            }
+                if ($activeRequests === 0) {
+                    break;
+                }
 
-            // Log progress every 5 seconds
-            if (fmod($waited, 5.0) < $checkInterval) {
-                error_log("⏳ {$workerType} #{$workerId} still waiting: {$activeRequests} requests active (waited: {$waited}s)");
-            }
-
-            Coroutine::sleep($checkInterval);
-            $waited += $checkInterval;
-        }
-
-        $finalRequests = Monitor::getActiveRequestCount();
-
-        if ($finalRequests > 0) {
-            error_log("⚠️  {$workerType} #{$workerId} timeout reached: {$finalRequests} requests still active (waited: {$waited}s)");
-
-            // Log which coroutines are still active for debugging
-            $activeIds = Monitor::getActiveRequestCoroutines();
-            if (!empty($activeIds)) {
-                error_log("🔍 Active request coroutine IDs: " . implode(', ', $activeIds));
+                Coroutine::sleep($checkInterval);
+                $waited += $checkInterval;
             }
         } else {
-            error_log("✅ {$workerType} #{$workerId} graceful shutdown complete (waited: {$waited}s)");
+            // error_log("{$workerType} #{$workerId} shutdown outside coroutine context — skipping wait loop");
         }
 
         // Clear tracked request coroutines

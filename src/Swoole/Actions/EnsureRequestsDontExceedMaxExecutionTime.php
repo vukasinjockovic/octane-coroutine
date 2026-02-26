@@ -53,19 +53,15 @@ class EnsureRequestsDontExceedMaxExecutionTime
                 continue;
             }
 
-            // Log the timeout
-            error_log("⏱️ Request timeout: Coroutine #{$coroutineId} exceeded {$this->maxExecutionTime}s max execution time");
+            // error_log("Request timeout: Coroutine #{$coroutineId} exceeded {$this->maxExecutionTime}s");
 
-            $cancelled = $this->cancelCoroutine($coroutineId);
+            $cancelled = $this->cancelCoroutine((int) $coroutineId);
 
             if (!$cancelled) {
-                // If coroutine cancellation failed, fall back to worker kill
-                // This is a last resort that will drop all concurrent requests
-                error_log("⚠️ Failed to cancel coroutine #{$coroutineId}, falling back to worker SIGKILL (PID: {$row['worker_pid']})");
+                // error_log("Failed to cancel coroutine #{$coroutineId}, falling back to worker SIGKILL (PID: {$row['worker_pid']})");
                 $this->extension->dispatchProcessSignal($row['worker_pid'], SIGKILL);
             }
 
-            // Try to send a 408 timeout response
             if ($this->server instanceof Server) {
                 try {
                     $response = Response::create($this->server, $row['fd']);
@@ -79,8 +75,7 @@ class EnsureRequestsDontExceedMaxExecutionTime
                         ]));
                     }
                 } catch (\Throwable $e) {
-                    // Response may already be closed
-                    error_log("⚠️ Could not send 408 response: " . $e->getMessage());
+                    // error_log("Could not send 408 response: " . $e->getMessage());
                 }
             }
         }
@@ -95,30 +90,21 @@ class EnsureRequestsDontExceedMaxExecutionTime
     protected function cancelCoroutine(int $coroutineId): bool
     {
         try {
-            // Check if coroutine exists
             if (method_exists(Coroutine::class, 'exists') && !Coroutine::exists($coroutineId)) {
-                error_log("ℹ️ Coroutine #{$coroutineId} no longer exists (already completed)");
-                return true; // Consider it handled
+                // error_log("Coroutine #{$coroutineId} no longer exists (already completed)");
+                return true;
             }
 
             if (!method_exists(Coroutine::class, 'cancel')) {
-                error_log("⚠️ Coroutine::cancel not available; falling back to worker kill");
+                // error_log("Coroutine::cancel not available; falling back to worker kill");
                 return false;
             }
 
-            // Cancel the coroutine
-            // This throws a Swoole\Coroutine\Cancelation exception in the coroutine
             $result = Coroutine::cancel($coroutineId);
-
-            if ($result) {
-                error_log("✅ Successfully cancelled coroutine #{$coroutineId}");
-            } else {
-                error_log("❌ Coroutine::cancel() returned false for #{$coroutineId}");
-            }
-
+            // error_log($result ? "Cancelled coroutine #{$coroutineId}" : "Coroutine::cancel() returned false for #{$coroutineId}");
             return $result;
         } catch (\Throwable $e) {
-            error_log("❌ Error cancelling coroutine #{$coroutineId}: " . $e->getMessage());
+            // error_log("Error cancelling coroutine #{$coroutineId}: " . $e->getMessage());
             return false;
         }
     }

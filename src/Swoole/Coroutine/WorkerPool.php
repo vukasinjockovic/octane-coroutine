@@ -94,13 +94,12 @@ class WorkerPool
 
                 // Shrink: terminate idle workers above minSize
                 if ($idleTime > $this->idleTimeout && $this->currentSize > $this->minSize) {
-                    error_log("📉 WorkerPool::acquire() - Shrinking idle worker (idle: {$idleTime}s > {$this->idleTimeout}s, currentSize: {$this->currentSize} -> " . ($this->currentSize - 1) . ")");
-
+                    // error_log("WorkerPool: Shrinking idle worker (idle: {$idleTime}s > {$this->idleTimeout}s, size: {$this->currentSize} -> " . ($this->currentSize - 1) . ")");
                     if (method_exists($worker, 'terminate')) {
                         try {
                             $worker->terminate();
                         } catch (\Throwable $e) {
-                            error_log("⚠️ WorkerPool::acquire() - Failed to terminate idle worker: " . $e->getMessage());
+                            // error_log("WorkerPool: Failed to terminate idle worker: " . $e->getMessage());
                         }
                     }
 
@@ -136,7 +135,7 @@ class WorkerPool
         $pushed = $this->channel->push($worker, 0.5);
 
         if (! $pushed) {
-            error_log("❌ WorkerPool::release() - Channel push failed! Terminating worker. currentSize={$this->currentSize}");
+            // error_log("WorkerPool::release() - Channel push failed, terminating worker. currentSize={$this->currentSize}");
             $this->currentSize = max($this->minSize, $this->currentSize - 1);
             unset($this->metadata[$workerId]);
 
@@ -170,17 +169,17 @@ class WorkerPool
     protected function grow(): ?object
     {
         if (! $this->lock->acquire(0.1)) {
-            error_log("⚠️ WorkerPool::grow() - Failed to acquire lock (contention)");
+            // error_log("WorkerPool::grow() - Failed to acquire lock (contention)");
             return null;
         }
 
         try {
             if ($this->currentSize >= $this->maxSize) {
-                error_log("⚠️ WorkerPool::grow() - Pool at max size ({$this->currentSize} >= {$this->maxSize})");
+                // error_log("WorkerPool::grow() - Pool at max size ({$this->currentSize} >= {$this->maxSize})");
                 return null;
             }
 
-            error_log("🌱 WorkerPool::grow() - Growing pool from {$this->currentSize} to " . ($this->currentSize + 1));
+            // error_log("WorkerPool::grow() - Growing pool from {$this->currentSize} to " . ($this->currentSize + 1));
             return $this->createWorker();
         } finally {
             $this->lock->release();
