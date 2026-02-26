@@ -122,8 +122,6 @@ class WorkerPool
     public function release(object $worker): bool
     {
         $workerId = spl_object_id($worker);
-
-        $available = $this->channel->length();
         $now = microtime(true);
 
         // Shrinking idle workers happens at acquire time, not release time.

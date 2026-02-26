@@ -120,6 +120,8 @@ $server->on('workerstart', fn (Server $server, $workerId) =>
 */
 
 $server->on('request', function ($request, $response) use ($server, $workerState, $serverState) {
+    $appDebug = filter_var($_ENV['APP_DEBUG'] ?? getenv('APP_DEBUG') ?: false, FILTER_VALIDATE_BOOLEAN);
+
     // Store request start time in coroutine context for per-request metrics.
     $requestStartTime = microtime(true);
 
@@ -153,13 +155,12 @@ $server->on('request', function ($request, $response) use ($server, $workerState
                 }
             }
         } catch (\Throwable $e) {
-            error_log("❌ Failed to acquire worker from pool: " . $e->getMessage());
+            // error_log("Failed to acquire worker from pool: " . $e->getMessage());
             $worker = null;
         }
 
         if (! $worker) {
-            $errCode = $workerState->clientPool->errCode;
-            error_log("❌ Pool pop failed! ErrCode: {$errCode}, Stats: " . json_encode($workerState->clientPool->stats()));
+            // error_log("Pool exhausted, returning {$overloadStatus}. Stats: " . json_encode($workerState->workerPool ? $workerState->workerPool->stats() : $workerState->clientPool->stats()));
 
             // Timeout occurred - pool is exhausted and queue is full/slow
             $response->status((int) $overloadStatus);
@@ -167,13 +168,17 @@ $server->on('request', function ($request, $response) use ($server, $workerState
             if (is_numeric($retryAfter) && (int) $retryAfter > 0) {
                 $response->header('Retry-After', (string) $retryAfter);
             }
-            $response->end(json_encode([
+            $body = [
                 'error' => 'Service Unavailable',
                 'message' => 'Server is too busy, please try again later',
-                'debug_pool_stats' => $workerState->clientPool->stats(),
-                'debug_err_code' => $errCode,
-                'debug_worker_pool' => $workerState->workerPool ? $workerState->workerPool->stats() : null,
-            ]));
+            ];
+            if ($appDebug) {
+                $body['debug'] = [
+                    'pool_stats' => $workerState->workerPool ? $workerState->workerPool->stats() : null,
+                    'channel_stats' => $workerState->clientPool ? $workerState->clientPool->stats() : null,
+                ];
+            }
+            $response->end(json_encode($body));
             return;
         }
     } else {
@@ -198,7 +203,7 @@ $server->on('request', function ($request, $response) use ($server, $workerState
         ]);
 
         if (!$setResult) {
-            error_log("⚠️ Timer table full! Could not track coroutine #{$cid}. Consider increasing max_timer_table_size.");
+            // error_log("Timer table full! Could not track coroutine #{$cid}. Consider increasing max_timer_table_size.");
         }
     }
 
@@ -211,26 +216,31 @@ $server->on('request', function ($request, $response) use ($server, $workerState
         ])));
     } catch (\Throwable $e) {
         // Catch all exceptions to prevent worker crashes — log and send 500 instead.
-        error_log("❌ CRITICAL ERROR in Worker #{$workerState->workerId} (Coroutine #" . Coroutine::getCid() . "): " . $e->getMessage());
-        error_log("   File: {$e->getFile()}:{$e->getLine()}");
+        // error_log("CRITICAL ERROR in Worker #{$workerState->workerId} (Coroutine #" . Coroutine::getCid() . "): " . $e->getMessage());
+        // error_log("   File: {$e->getFile()}:{$e->getLine()}");
         
         // Send 500 error response if not already sent
         if (!$response->isWritable()) {
-            error_log("   Response already sent, cannot send error response");
+            // error_log("Response already sent, cannot send error response");
         } else {
             try {
                 $response->status(500);
                 $response->header('Content-Type', 'application/json');
-                $response->end(json_encode([
+                $body = [
                     'error' => 'Internal Server Error',
-                    'message' => (isset($serverState['octaneConfig']['app']['debug']) && $serverState['octaneConfig']['app']['debug'])
-                        ? $e->getMessage()
-                        : 'An error occurred while processing your request',
-                    'worker_id' => $workerState->workerId,
-                    'coroutine_id' => Coroutine::getCid(),
-                ]));
+                    'message' => 'An error occurred while processing your request',
+                ];
+                if ($appDebug) {
+                    $body['debug'] = [
+                        'exception' => $e->getMessage(),
+                        'file' => $e->getFile() . ':' . $e->getLine(),
+                        'worker_id' => $workerState->workerId,
+                        'coroutine_id' => Coroutine::getCid(),
+                    ];
+                }
+                $response->end(json_encode($body));
             } catch (\Throwable $responseError) {
-                error_log("   Failed to send error response: " . $responseError->getMessage());
+                // error_log("Failed to send error response: " . $responseError->getMessage());
             }
         }
         
@@ -250,7 +260,7 @@ $server->on('request', function ($request, $response) use ($server, $workerState
                 $kept = $workerState->workerPool->release($worker);
             } catch (\Throwable $e) {
                 $kept = false;
-                error_log('⚠️ Worker pool release failed - terminating worker: '.$e->getMessage());
+                // error_log('Worker pool release failed - terminating worker: '.$e->getMessage());
             }
 
             if (! $kept) {
