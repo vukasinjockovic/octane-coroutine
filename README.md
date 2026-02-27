@@ -2,6 +2,52 @@
 
 ⚡ **High-performance Laravel** with true coroutine support for massive concurrency
 
+## BusinessPress Integration
+
+This package is included in `businesspress/core` as an optional dependency with
+Laravel's `dont-discover` set — its service provider does **not** auto-register.
+By default, BusinessPress uses standard `laravel/octane`.
+
+### Enabling octane-coroutine
+
+To switch from standard Octane to octane-coroutine:
+
+**1. Register the service provider** in your app's `config/app.php` or a service provider:
+
+```php
+// config/app.php → 'providers' array
+Laravel\Octane\OctaneCoroutineServiceProvider::class,
+```
+
+**2. Swap the OperationTerminated listeners** in your published `config/octane.php`:
+
+```php
+OperationTerminated::class => [
+    FlushOnce::class,
+    FlushTemporaryContainerInstances::class,
+    // DisconnectFromDatabases::class, // DISABLE — reconnect overhead kills pool performance
+    ResetDatabaseState::class,         // ENABLE  — lightweight, keeps persistent PDO connections
+    // CollectGarbage::class,          // ALWAYS DISABLED
+],
+```
+
+**Why:** Standard Octane's `DisconnectFromDatabases` tears down and rebuilds PDO
+connections after every request. With octane-coroutine's persistent connection pool,
+this causes p95 latency to balloon from 103ms to 773ms under load.
+`ResetDatabaseState` only rolls back leaked transactions (99%+ no-op).
+
+**3. The `swoole.pool`, `swoole.options.mode`, and coroutine settings** in
+`config/octane.php` are already pre-configured — they are simply ignored by
+standard laravel/octane and only take effect when octane-coroutine is active.
+
+### Disabling octane-coroutine (reverting to standard)
+
+1. Remove the service provider registration
+2. Swap back: enable `DisconnectFromDatabases`, disable `ResetDatabaseState`
+3. The pool/BASE/coroutine config keys are harmless — standard Octane ignores them
+
+---
+
 [![Packagist Version](https://img.shields.io/packagist/v/modelslab/octane-coroutine.svg)](https://packagist.org/packages/modelslab/octane-coroutine)
 [![Packagist Downloads](https://img.shields.io/packagist/dt/modelslab/octane-coroutine.svg)](https://packagist.org/packages/modelslab/octane-coroutine)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)

@@ -86,8 +86,8 @@ class Worker implements WorkerContract
             CurrentApplication::set($sandbox);
         }
 
-        // PROFILER: After sandbox clone
-        \App\Profiling\RequestTimeline::mark('sandbox_created');
+        // PROFILER: After sandbox clone (disabled — uncomment to enable)
+        // \BusinessPress\Core\Profiling\RequestTimeline::mark('sandbox_created');
 
         $gateway = new ApplicationGateway($this->app, $sandbox);
 
@@ -114,15 +114,15 @@ class Worker implements WorkerContract
 
             $responded = true;
 
-            // PROFILER: After response sent to client
-            \App\Profiling\RequestTimeline::mark('response_sent');
+            // PROFILER: After response sent to client (disabled)
+            // \BusinessPress\Core\Profiling\RequestTimeline::mark('response_sent');
 
             $this->invokeRequestHandledCallbacks($request, $response, $sandbox);
 
             $gateway->terminate($request, $response);
 
-            // PROFILER: After terminate
-            \App\Profiling\RequestTimeline::mark('terminate_done');
+            // PROFILER: After terminate (disabled)
+            // \BusinessPress\Core\Profiling\RequestTimeline::mark('terminate_done');
         } catch (Throwable $e) {
             $this->handleWorkerError($e, $sandbox, $request, $context, $responded);
         } finally {
@@ -157,18 +157,17 @@ class Worker implements WorkerContract
             $this->app->make('view.engine.resolver')->forget('blade');
             $this->app->make('view.engine.resolver')->forget('php');
 
-            // PROFILER: After all cleanup (DB release, Redis release, sandbox flush)
-            // Must be BEFORE Context::clear() which destroys the coroutine context
-            \App\Profiling\RequestTimeline::mark('cleanup_done');
+            // PROFILER: After all cleanup (disabled)
+            // \BusinessPress\Core\Profiling\RequestTimeline::mark('cleanup_done');
 
-            // PROFILER: Flush timeline to log BEFORE context is cleared
-            if (isset($request)) {
-                \App\Profiling\RequestTimeline::flush(
-                    $request->getMethod(),
-                    $request->getPathInfo(),
-                    isset($response) ? $response->getStatusCode() : 500
-                );
-            }
+            // PROFILER: Flush timeline to log BEFORE context is cleared (disabled)
+            // if (isset($request)) {
+            //     \BusinessPress\Core\Profiling\RequestTimeline::flush(
+            //         $request->getMethod(),
+            //         $request->getPathInfo(),
+            //         isset($response) ? $response->getStatusCode() : 500
+            //     );
+            // }
 
             if (class_exists(Context::class) && Coroutine::getCid() > 0) {
                 Context::clear();
