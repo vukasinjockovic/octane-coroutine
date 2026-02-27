@@ -95,8 +95,43 @@ $workerState->cacheTable = require __DIR__.'/createSwooleCacheTable.php';
 $workerState->timerTable = $timerTable;
 $workerState->tables = require __DIR__.'/createSwooleTables.php';
 
+/*
+|--------------------------------------------------------------------------
+| Stats Tables (Shared Memory)
+|--------------------------------------------------------------------------
+| Two Swoole Tables for per-worker stats collection:
+| - $statsCounters: atomic incr/decr for request counts
+| - $statsSnapshots: periodic set() for coroutine/pool state
+| Controlled via SWOOLE_STATS_ENABLED env var.
+*/
+
+// Read SWOOLE_STATS_ENABLED from .env (before Laravel bootstrap)
+$swooleStatsEnabled = false;
+$envPath = isset($serverState['publicPath']) ? dirname($serverState['publicPath']) . '/.env' : '';
+if ($envPath && file_exists($envPath)) {
+    $envContent = file_get_contents($envPath);
+    if (preg_match('/^SWOOLE_STATS_ENABLED\s*=\s*(.+)$/m', $envContent, $m)) {
+        $swooleStatsEnabled = filter_var(trim($m[1]), FILTER_VALIDATE_BOOLEAN);
+    }
+}
+
+$statsCounters = new \Swoole\Table(64);
+$statsCounters->column('requests_active', \Swoole\Table::TYPE_INT);
+$statsCounters->column('requests_total', \Swoole\Table::TYPE_INT);
+$statsCounters->create();
+
+$statsSnapshots = new \Swoole\Table(64);
+$statsSnapshots->column('worker_id', \Swoole\Table::TYPE_INT);
+$statsSnapshots->column('pid', \Swoole\Table::TYPE_INT);
+$statsSnapshots->column('coroutine_num', \Swoole\Table::TYPE_INT);
+$statsSnapshots->column('pool_current', \Swoole\Table::TYPE_INT);
+$statsSnapshots->column('pool_available', \Swoole\Table::TYPE_INT);
+$statsSnapshots->column('pool_max', \Swoole\Table::TYPE_INT);
+$statsSnapshots->column('updated_at', \Swoole\Table::TYPE_FLOAT, 8);
+$statsSnapshots->create();
+
 $server->on('workerstart', fn (Server $server, $workerId) =>
-    (function (string $basePath) use ($server, $workerId, $serverState, $workerState, $timerTable) {
+    (function (string $basePath) use ($server, $workerId, $serverState, $workerState, $timerTable, $swooleStatsEnabled, $statsCounters, $statsSnapshots) {
         $handler = new OnWorkerStart(
             new SwooleExtension,
             $basePath,
@@ -105,6 +140,76 @@ $server->on('workerstart', fn (Server $server, $workerId) =>
         );
 
         $handler($server, $workerId);
+
+        // Stats collection timer (per-worker, every 500ms)
+        if ($swooleStatsEnabled && ! ($workerId >= ($server->setting['worker_num'] ?? 1))) {
+            $wid = (string) $workerId;
+
+            // Initialize counter row
+            $statsCounters->set($wid, ['requests_active' => 0, 'requests_total' => 0]);
+
+            // Snapshot timer — updates coroutine/pool stats
+            Timer::tick(500, function () use ($statsSnapshots, $workerState, $wid) {
+                $poolStats = $workerState->workerPool?->stats() ?? [];
+                $coStats = Coroutine::stats();
+                $statsSnapshots->set($wid, [
+                    'worker_id'      => $workerState->workerId ?? 0,
+                    'pid'            => $workerState->workerPid ?? 0,
+                    'coroutine_num'  => $coStats['coroutine_num'] ?? 0,
+                    'pool_current'   => $poolStats['current_size'] ?? 0,
+                    'pool_available' => $poolStats['available'] ?? 0,
+                    'pool_max'       => $poolStats['max_size'] ?? 0,
+                    'updated_at'     => microtime(true),
+                ]);
+            });
+
+            // Worker 0: aggregate stats logger (every 1s)
+            if ($workerId === 0) {
+                $logPath = ($serverState['publicPath'] ?? '/var/www/reactive-1.businesspress.dev/public');
+                $logPath = dirname($logPath) . '/storage/logs/swoole-stats.log';
+
+                Timer::tick(1000, function () use ($server, $statsCounters, $statsSnapshots, $logPath) {
+                    $serverStats = $server->stats();
+                    $workers = [];
+                    $totalActive = 0;
+                    $totalCoroutines = 0;
+                    $totalPoolCurrent = 0;
+                    $totalPoolAvailable = 0;
+
+                    foreach ($statsSnapshots as $wid => $snap) {
+                        $counters = $statsCounters->get($wid) ?: ['requests_active' => 0, 'requests_total' => 0];
+                        $workers[] = [
+                            'wid'            => (int) $wid,
+                            'active'         => $counters['requests_active'],
+                            'total'          => $counters['requests_total'],
+                            'coroutines'     => $snap['coroutine_num'],
+                            'pool_cur'       => $snap['pool_current'],
+                            'pool_avail'     => $snap['pool_available'],
+                            'pool_max'       => $snap['pool_max'],
+                        ];
+                        $totalActive += $counters['requests_active'];
+                        $totalCoroutines += $snap['coroutine_num'];
+                        $totalPoolCurrent += $snap['pool_current'];
+                        $totalPoolAvailable += $snap['pool_available'];
+                    }
+
+                    $entry = [
+                        'ts'                  => date('H:i:s'),
+                        'conn_num'            => $serverStats['connection_num'] ?? 0,
+                        'idle_workers'        => $serverStats['idle_worker_num'] ?? 0,
+                        'total_active'        => $totalActive,
+                        'total_coroutines'    => $totalCoroutines,
+                        'total_pool_current'  => $totalPoolCurrent,
+                        'total_pool_available' => $totalPoolAvailable,
+                        'request_count'       => $serverStats['request_count'] ?? 0,
+                        'dispatch_count'      => $serverStats['dispatch_count'] ?? 0,
+                        'workers'             => $workers,
+                    ];
+
+                    @file_put_contents($logPath, json_encode($entry) . "\n", FILE_APPEND);
+                });
+            }
+        }
     })($bootstrap($serverState))
 );
 
@@ -119,10 +224,45 @@ $server->on('workerstart', fn (Server $server, $workerId) =>
 |
 */
 
-$server->on('request', function ($request, $response) use ($server, $workerState, $serverState) {
+$server->on('request', function ($request, $response) use ($server, $workerState, $serverState, $swooleStatsEnabled, $statsCounters, $statsSnapshots) {
     $appDebug = filter_var($_ENV['APP_DEBUG'] ?? getenv('APP_DEBUG') ?: false, FILTER_VALIDATE_BOOLEAN);
 
+    // STATS: Short-circuit /swoole-stats endpoint (bypasses pool/Laravel entirely)
+    if ($swooleStatsEnabled && ($request->server['request_uri'] ?? '') === '/swoole-stats') {
+        $serverStats = $server->stats();
+        $workers = [];
+        $summary = ['total_active' => 0, 'total_coroutines' => 0, 'total_pool_current' => 0, 'total_pool_available' => 0];
+
+        foreach ($statsSnapshots as $wid => $snap) {
+            $counters = $statsCounters->get($wid) ?: ['requests_active' => 0, 'requests_total' => 0];
+            $row = array_merge($snap, $counters);
+            $workers[] = $row;
+            $summary['total_active'] += $counters['requests_active'];
+            $summary['total_coroutines'] += $snap['coroutine_num'];
+            $summary['total_pool_current'] += $snap['pool_current'];
+            $summary['total_pool_available'] += $snap['pool_available'];
+        }
+
+        $response->header('Content-Type', 'application/json');
+        $response->end(json_encode([
+            'server'  => $serverStats,
+            'summary' => $summary,
+            'workers' => $workers,
+        ], JSON_PRETTY_PRINT));
+        return;
+    }
+
     $requestStartTime = microtime(true);
+
+    // STATS: Track request start
+    $wid = $swooleStatsEnabled ? (string) ($workerState->workerId ?? 0) : null;
+    if ($wid !== null) {
+        $statsCounters->incr($wid, 'requests_active', 1);
+        $statsCounters->incr($wid, 'requests_total', 1);
+    }
+
+    // PROFILER: Initialize timeline at the earliest possible point
+    $profiling = \App\Profiling\RequestTimeline::begin();
 
     // Wait for worker to be fully initialized
     while (! ($workerState->ready ?? false)) {
@@ -160,6 +300,11 @@ $server->on('request', function ($request, $response) use ($server, $workerState
             $worker = null;
         }
 
+        // PROFILER: Mark pool acquisition time
+        if ($profiling) {
+            \App\Profiling\RequestTimeline::mark('pool_acquired');
+        }
+
         if (! $worker) {
             // Pool exhausted — send 503
             if ($response->isWritable()) {
@@ -184,6 +329,10 @@ $server->on('request', function ($request, $response) use ($server, $workerState
     } else {
         // Fallback if pool not initialized
         $worker = $workerState->worker;
+        // PROFILER: No pool — mark immediately
+        if ($profiling) {
+            \App\Profiling\RequestTimeline::mark('pool_acquired');
+        }
     }
 
     $cid = Coroutine::getCid();
@@ -209,6 +358,12 @@ $server->on('request', function ($request, $response) use ($server, $workerState
             'publicPath' => $serverState['publicPath'],
             'octaneConfig' => $serverState['octaneConfig'],
         ]));
+
+        // PROFILER: Mark after request marshaling
+        if ($profiling) {
+            \App\Profiling\RequestTimeline::mark('request_marshaled');
+        }
+
         $worker->handle(...$marshaledArgs);
     } catch (\Throwable $e) {
         error_log("[HANDLE_ERR] " . get_class($e) . ": {$e->getMessage()} at {$e->getFile()}:{$e->getLine()}");
@@ -231,6 +386,11 @@ $server->on('request', function ($request, $response) use ($server, $workerState
             }
         }
     } finally {
+        // STATS: Track request end
+        if ($wid !== null) {
+            $statsCounters->decr($wid, 'requests_active', 1);
+        }
+
         $cid = Coroutine::getCid();
 
         if ($workerState->timerTable) {

@@ -56,7 +56,7 @@ trait ProvidesDefaultConfigurationOptions
             \Laravel\Octane\Listeners\FlushVite::class,
 
             // First-Party Packages...
-            \Laravel\Octane\Listeners\PrepareInertiaForNextOperation::class,
+            // \Laravel\Octane\Listeners\PrepareInertiaForNextOperation::class,
             \Laravel\Octane\Listeners\PrepareLivewireForNextOperation::class,
             \Laravel\Octane\Listeners\PrepareScoutForNextOperation::class,
             \Laravel\Octane\Listeners\PrepareSocialiteForNextOperation::class,

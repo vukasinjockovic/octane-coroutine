@@ -51,9 +51,17 @@ class ServerProcessInspector implements ServerProcessInspectorContract
             'managerProcessId' => $managerProcessId
         ] = $this->serverStateFile->read();
 
-        $workerProcessIds = $this->exec->run('pgrep -P '.$managerProcessId);
+        // In SWOOLE_BASE mode, there is no manager process (pid=0).
+        // Workers are direct children of the master process.
+        $parentPid = $managerProcessId ?: $masterProcessId;
+        $workerProcessIds = $parentPid ? $this->exec->run('pgrep -P '.$parentPid) : [];
 
-        foreach ([$masterProcessId, $managerProcessId, ...$workerProcessIds] as $processId) {
+        $pidsToKill = array_filter(
+            [$masterProcessId, $managerProcessId, ...$workerProcessIds],
+            fn ($pid) => (int) $pid > 0
+        );
+
+        foreach ($pidsToKill as $processId) {
             $this->dispatcher->signal((int) $processId, SIGKILL);
         }
 

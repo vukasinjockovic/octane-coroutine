@@ -73,27 +73,6 @@ class DatabasePoolTest extends TestCase
         $this->assertTrue(true);
     }
 
-    public function test_mysql_session_reset_commands_are_correct()
-    {
-        // Verify the SQL commands used for MySQL session reset
-        $expectedCommands = [
-            'SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ',
-            'SET autocommit = 1',
-        ];
-
-        foreach ($expectedCommands as $command) {
-            $this->assertStringContainsString('SET', $command);
-        }
-    }
-
-    public function test_postgresql_session_reset_command_is_correct()
-    {
-        // Verify the SQL command used for PostgreSQL session reset
-        $expectedCommand = 'RESET ALL';
-
-        $this->assertEquals('RESET ALL', $expectedCommand);
-    }
-
     public function test_pool_stats_structure()
     {
         // Verify the expected structure of pool stats
@@ -117,42 +96,104 @@ class DatabasePoolTest extends TestCase
         }
     }
 
-    public function test_reset_connection_rolls_back_and_resets_mysql_session()
+    public function test_reset_connection_rolls_back_transaction_for_mysql()
     {
         $pool = $this->newPoolWithoutConstructor();
 
         $pdo = Mockery::mock(PDO::class);
         $pdo->shouldReceive('inTransaction')->andReturn(true);
         $pdo->shouldReceive('rollBack')->once();
-        $pdo->shouldReceive('exec')->with('SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ')->once();
-        $pdo->shouldReceive('exec')->with('SET autocommit = 1')->once();
+        // After removing unnecessary DB round-trips, resetConnection should
+        // NOT run MySQL session reset commands (SET SESSION ..., SET autocommit)
+        $pdo->shouldNotReceive('exec');
 
         $connection = Mockery::mock(Connection::class);
         $connection->shouldReceive('getPdo')->andReturn($pdo);
         $connection->shouldReceive('flushQueryLog')->once();
-        $connection->shouldReceive('getDriverName')->andReturn('mysql');
+        // getDriverName should NOT be called since we removed driver-specific blocks
+        $connection->shouldNotReceive('getDriverName');
 
         $this->invokeResetConnection($pool, $connection);
 
         $this->assertTrue(true);
     }
 
-    public function test_reset_connection_resets_postgres_session()
+    public function test_reset_connection_does_not_run_reset_all_for_postgres()
     {
         $pool = $this->newPoolWithoutConstructor();
 
         $pdo = Mockery::mock(PDO::class);
         $pdo->shouldReceive('inTransaction')->andReturn(false);
-        $pdo->shouldReceive('exec')->with('RESET ALL')->once();
+        // After removing unnecessary DB round-trips, resetConnection should
+        // NOT run RESET ALL for PostgreSQL
+        $pdo->shouldNotReceive('exec');
 
         $connection = Mockery::mock(Connection::class);
         $connection->shouldReceive('getPdo')->andReturn($pdo);
         $connection->shouldReceive('flushQueryLog')->once();
-        $connection->shouldReceive('getDriverName')->andReturn('pgsql');
+        // getDriverName should NOT be called since we removed driver-specific blocks
+        $connection->shouldNotReceive('getDriverName');
 
         $this->invokeResetConnection($pool, $connection);
 
         $this->assertTrue(true);
+    }
+
+    public function test_reset_connection_only_does_rollback_and_flush()
+    {
+        // After optimization, resetConnection should only:
+        // 1. Roll back open transactions
+        // 2. Flush query log
+        // It should NOT run any driver-specific session reset commands.
+        $pool = $this->newPoolWithoutConstructor();
+
+        $pdo = Mockery::mock(PDO::class);
+        $pdo->shouldReceive('inTransaction')->andReturn(false);
+        $pdo->shouldNotReceive('exec');
+
+        $connection = Mockery::mock(Connection::class);
+        $connection->shouldReceive('getPdo')->andReturn($pdo);
+        $connection->shouldReceive('flushQueryLog')->once();
+        $connection->shouldNotReceive('getDriverName');
+
+        $this->invokeResetConnection($pool, $connection);
+
+        $this->assertTrue(true);
+    }
+
+    public function test_pool_has_last_used_tracking_property()
+    {
+        // The pool should have a lastUsedAt property (SplObjectStorage) for
+        // tracking when each connection was last used, enabling time-based
+        // health checks instead of SELECT 1 on every borrow.
+        $pool = $this->newPoolWithoutConstructor();
+
+        $reflection = new \ReflectionClass(DatabasePool::class);
+        $this->assertTrue(
+            $reflection->hasProperty('lastUsedAt'),
+            'DatabasePool should have a lastUsedAt property for time-based health checks'
+        );
+    }
+
+    public function test_check_connection_idle_threshold_defaults_to_30_seconds()
+    {
+        // The idle threshold for running SELECT 1 health checks should default
+        // to 30 seconds. Connections used within 30 seconds are trusted valid.
+        $pool = $this->newPoolWithoutConstructor();
+
+        $reflection = new \ReflectionClass(DatabasePool::class);
+        $this->assertTrue(
+            $reflection->hasProperty('idleCheckThreshold'),
+            'DatabasePool should have an idleCheckThreshold property'
+        );
+
+        $prop = $reflection->getProperty('idleCheckThreshold');
+        $prop->setAccessible(true);
+        $this->assertEquals(
+            30,
+            $prop->getValue($pool),
+            'idleCheckThreshold should default to 30 seconds'
+        );
     }
 
     public function test_get_creates_connection_immediately_when_pool_can_grow()

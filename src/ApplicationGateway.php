@@ -44,6 +44,9 @@ class ApplicationGateway
 
         $this->dispatchEvent($this->sandbox, new RequestReceived($this->app, $this->sandbox, $request));
 
+        // PROFILER: After all 27 Octane RequestReceived listeners
+        \App\Profiling\RequestTimeline::mark('octane_events_done');
+
         if (Octane::hasRouteFor($request->getMethod(), '/'.$request->path())) {
             self::gState("gw_octane_route:{$request->getPathInfo()}");
             return Octane::invokeRoute($request, $request->getMethod(), '/'.$request->path());
@@ -53,9 +56,15 @@ class ApplicationGateway
 
         $kernel = $this->sandbox->make(Kernel::class);
 
+        // PROFILER: Kernel resolved, about to enter middleware pipeline
+        \App\Profiling\RequestTimeline::mark('kernel_start');
+
         self::gState("gw_kernel_handle:{$request->getPathInfo()}");
 
         return tap($kernel->handle($request), function ($response) use ($request) {
+            // PROFILER: After kernel->handle (all middleware + controller done)
+            \App\Profiling\RequestTimeline::mark('response_created');
+
             self::gState("gw_kernel_done:{$request->getPathInfo()}");
             $this->dispatchEvent($this->sandbox, new RequestHandled($this->sandbox, $request, $response));
         });

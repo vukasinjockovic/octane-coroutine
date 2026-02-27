@@ -2,6 +2,7 @@
 
 namespace Laravel\Octane\Swoole\Database;
 
+use SplObjectStorage;
 use Swoole\Coroutine\Channel;
 use Illuminate\Database\Connectors\ConnectionFactory;
 use Illuminate\Database\Connection;
@@ -19,12 +20,26 @@ class DatabasePool
     protected ConnectionFactory $factory;
     protected array $connectionConfig;
 
+    /**
+     * Tracks the last time each connection was used (unix timestamp).
+     * Used for time-based health checks: only run SELECT 1 on connections
+     * that have been idle longer than $idleCheckThreshold seconds.
+     */
+    protected SplObjectStorage $lastUsedAt;
+
+    /**
+     * Seconds a connection can sit idle before we verify it with SELECT 1.
+     * Connections used within this window are trusted to be valid.
+     */
+    protected int $idleCheckThreshold = 30;
+
     public function __construct(array $config, array $connectionConfig, string $name, ConnectionFactory $factory)
     {
         $this->config = $config;
         $this->name = $name;
         $this->factory = $factory;
         $this->connectionConfig = $connectionConfig;
+        $this->lastUsedAt = new SplObjectStorage();
 
         // Create a channel for pooling connections
         // Channel size = max_connections
@@ -67,9 +82,17 @@ class DatabasePool
             }
         }
 
-        // Check if connection is still valid
-        if (!$this->checkConnection($connection)) {
-            $connection = $this->reconnect($connection);
+        // Time-based health check: only verify connections idle > threshold seconds.
+        // Recently used connections are trusted to be valid, avoiding a SELECT 1
+        // round-trip (~0.5-4ms) on every borrow.
+        $lastUsed = $this->lastUsedAt->contains($connection)
+            ? $this->lastUsedAt[$connection]
+            : 0;
+
+        if ((time() - $lastUsed) > $this->idleCheckThreshold) {
+            if (!$this->checkConnection($connection)) {
+                $connection = $this->reconnect($connection);
+            }
         }
 
         return $connection;
@@ -87,17 +110,22 @@ class DatabasePool
         try {
             $this->resetConnection($connection);
 
+            // Track when this connection was last used for time-based health checks
+            $this->lastUsedAt[$connection] = time();
+
             $pushTimeout = $this->config['release_timeout'] ?? 1.0;
             $pushed = $this->channel->push($connection, $pushTimeout);
 
             if (!$pushed) {
                 // error_log("DB pool release timeout - closing connection instead");
+                $this->lastUsedAt->detach($connection);
                 $this->closeConnection($connection);
                 $this->currentConnections--;
             }
         } catch (Throwable $e) {
             // error_log("Error releasing connection to pool: " . $e->getMessage());
             // Try to close the connection to prevent leaks
+            $this->lastUsedAt->detach($connection);
             $this->closeConnection($connection);
             $this->currentConnections--;
         }
@@ -105,46 +133,29 @@ class DatabasePool
 
     /**
      * Reset connection state to prevent state leaks between requests.
+     *
+     * Only rolls back open transactions and flushes the query log.
+     * Driver-specific session resets (RESET ALL for PostgreSQL, SET SESSION
+     * for MySQL) were removed to eliminate unnecessary DB round-trips on
+     * every connection release. Pooled connections maintain consistent
+     * session state because Laravel does not modify session-level settings
+     * during normal request handling.
      */
     protected function resetConnection($connection): void
     {
         try {
-            // Check if there's an active transaction and roll it back
             if ($connection instanceof Connection) {
                 // Roll back any open transaction
                 $pdo = $connection->getPdo();
 
                 if ($pdo && $pdo->inTransaction()) {
-                    // error_log("Rolling back uncommitted transaction before returning to pool");
                     $pdo->rollBack();
                 }
 
                 // Reset the query log
                 $connection->flushQueryLog();
-
-                // Reset session variables for MySQL
-                $driver = $connection->getDriverName();
-                if (in_array($driver, ['mysql', 'mariadb'])) {
-                    try {
-                        // Reset session state
-                        $pdo->exec('SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ');
-                        $pdo->exec('SET autocommit = 1');
-                    } catch (Throwable $e) {
-                        // error_log("Could not reset MySQL session: " . $e->getMessage());
-                    }
-                }
-
-                // For PostgreSQL
-                if ($driver === 'pgsql') {
-                    try {
-                        $pdo->exec('RESET ALL');
-                    } catch (Throwable $e) {
-                        // error_log("Could not reset PostgreSQL session: " . $e->getMessage());
-                    }
-                }
             }
         } catch (Throwable $e) {
-            // error_log("Error resetting connection state: " . $e->getMessage());
             throw $e;
         }
     }
@@ -215,6 +226,7 @@ class DatabasePool
                 break; // No more connections in channel
             }
 
+            $this->lastUsedAt->detach($connection);
             $this->closeConnection($connection);
             $this->currentConnections--;
         }
