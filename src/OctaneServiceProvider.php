@@ -135,6 +135,7 @@ class OctaneServiceProvider extends ServiceProvider
     protected function bindListeners()
     {
         $this->app->singleton(Listeners\CollectGarbage::class);
+        $this->app->singleton(Listeners\DisableGarbageCollection::class);
         $this->app->singleton(Listeners\CreateConfigurationSandbox::class);
         $this->app->singleton(Listeners\CreateUrlGeneratorSandbox::class);
         $this->app->singleton(Listeners\DisconnectFromDatabases::class);

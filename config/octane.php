@@ -13,6 +13,7 @@ use Laravel\Octane\Events\WorkerStarting;
 use Laravel\Octane\Events\WorkerStopping;
 use Laravel\Octane\Listeners\CloseMonologHandlers;
 use Laravel\Octane\Listeners\CollectGarbage;
+use Laravel\Octane\Listeners\DisableGarbageCollection;
 use Laravel\Octane\Listeners\DisconnectFromDatabases;
 use Laravel\Octane\Listeners\EnsureUploadedFilesAreValid;
 use Laravel\Octane\Listeners\EnsureUploadedFilesCanBeMoved;
@@ -68,6 +69,7 @@ return [
         WorkerStarting::class => [
             EnsureUploadedFilesAreValid::class,
             EnsureUploadedFilesCanBeMoved::class,
+            DisableGarbageCollection::class,
         ],
 
         RequestReceived::class => [
@@ -264,6 +266,37 @@ return [
     */
 
     'garbage' => 50,
+
+    /*
+    |--------------------------------------------------------------------------
+    | Disable PHP Internal Cyclic GC
+    |--------------------------------------------------------------------------
+    |
+    | PHP's internal cyclic garbage collector triggers gc_collect_cycles()
+    | when its gc_root buffer fills (~10,000 potential circular references).
+    | This is a stop-the-world operation that scans the entire object graph,
+    | causing 60-80ms pauses under load — visible as a bimodal latency
+    | pattern where every ~6th request spikes.
+    |
+    | This is different from Octane's CollectGarbage listener which calls
+    | gc_collect_cycles() probabilistically after requests (controlled by
+    | the 'garbage' config above). This setting disables PHP's OWN automatic
+    | GC mechanism.
+    |
+    | When disabled, memory cleanup from circular references relies entirely
+    | on worker recycling via max_request (swoole.options.max_request).
+    |
+    | IMPORTANT: If you enable this, you MUST set max_request to a reasonable
+    | value (1000-2000). Without PHP GC or worker recycling, memory from
+    | circular references will grow unbounded (~0.52 MB/request for typical
+    | GraphQL mutations). Every code path and package must be tested for
+    | memory leaks — max_request is the ONLY safety net.
+    |
+    | Works with both standard Octane and octane-coroutine.
+    |
+    */
+
+    'disable_php_gc' => env('OCTANE_DISABLE_PHP_GC', false),
 
     /*
     |--------------------------------------------------------------------------
